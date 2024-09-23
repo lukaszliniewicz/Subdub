@@ -1,0 +1,8 @@
+requests
+pydub
+srt
+anthropic
+openai
+yt-dlp
+srt-equalizer
+deepl
