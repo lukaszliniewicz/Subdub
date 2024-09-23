@@ -27,7 +27,7 @@ Subdub is a command-line tool for translating video subtitles and generating dub
 ## Usage
 
 Basic usage:
-`python Subdub.py -i [input_file] -sl [source_language] -tl [target_language] -task [task_name] -tts_voice [path to 6-12s wav 22050hz mono .wav file]`
+`python Subdub.py -i [input_file] -sl [source_language] -tl [target_language] -task [task_name] -tts_voice [path to a 6-12s 22050hz mono .wav file]`
 
 If you want to perform translation, you need to have an Anthropic, OpenAI or DeepL API key and provide it as an argument. Using the local LLM API (Text Generation WebUI's) doesn't require an api key. You can also set the keys as environmental values (OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPL_API_KEY).  
 
