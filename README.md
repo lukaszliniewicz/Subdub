@@ -86,12 +86,12 @@ Subdub offers several task modes to suit different needs:
 | `-translation_memory` | Enable translation memory/glossary feature | False |
 | `-tts_voice` | Path to TTS voice WAV file | - |
 | `-whisper_model` | Whisper model for transcription | large-v2 |
-| `-llm-model` | LLM model for translation (haiku/sonnet) | sonnet |
+| `-llm-model` | LLM model for translation (sonnet, haiku, gpt-4o and gpt-4o-mini) | sonnet |
 | `-merge_threshold` | Max time (ms) between subtitles to merge | 1 |
 
 ### Evaluation and Glossary
 
-- **Evaluate (-evaluate)**: When enabled, this feature performs an additional pass on the translated subtitles. It uses the AI model to review and improve the initial translations, ensuring better quality and consistency.
+- **Evaluate (-evaluate)**: When enabled, this feature performs an additional pass on the translated subtitles. It uses the AI model to review and improve the initial translations, trying to produce better quality and consistency. Only bigger models like Sonnet and GPT-4o can consistently adhere to the instructions. It should be used for output that must be as good as can be achieved with AI translation. Be mindful of the additional cost. Generally, Sonnet performs the best.
 
 - **Translation Memory/Glossary (-translation_memory)**: This feature maintains a glossary of terms and their translations. It helps ensure consistency across the translation, especially for domain-specific terms or recurring phrases. The glossary is updated throughout the translation process and can be reused in future sessions.
 
@@ -103,7 +103,7 @@ Subdub follows a logical workflow to process videos and generate dubbed audio:
 
 2. **Translation Blocks**: The SRT file is divided into translation blocks, considering character limits and sentence structures.
 
-3. **Translation**: Each block is translated using the Anthropic API. If translation memory is enabled, a glossary is used and updated during this process.
+3. **Translation**: Each block is translated using an API. If translation memory is enabled, a glossary is used and updated during this process.
 
 4. **Translated SRT**: The translated blocks are reassembled into a new SRT file in the target language.
 
@@ -113,7 +113,7 @@ Subdub follows a logical workflow to process videos and generate dubbed audio:
 
 7. **Alignment Blocks**: Speech blocks are aligned with the original video timing.
 
-8. **Synchronization and Mixing**: The generated audio is synchronized with the video. During this process, the original audio volume is lowered when dubbed audio is playing, creating a professional-sounding output.
+8. **Synchronization and Mixing**: The generated audio is synchronized with the video. During this process, the original audio volume is lowered when dubbed audio is playing.
 
 ## Examples
 
@@ -126,14 +126,11 @@ python Subdub.py -i subtitles.srt -sl English -tl French -task translate -evalua
 3. Generate TTS for translated subtitles with a custom voice:
 python Subdub.py -i translated.srt -tl German -task tts -tts_voice custom_voice.wav
 
-4. Create speech blocks with custom merge threshold:
-python Subdub.py -i subtitles.srt -task speech_blocks -merge_threshold 500
-
 ## Dependencies
 
 - FFmpeg
 - WhisperX
-- Anthropic API (for translation)
+- Anthropic, OpenAI, DeepL or Text Generation WebUI API (for translation)
 - XTTS API Server (for Text-to-Speech)
 
 Ensure all dependencies are installed and properly configured before running Subdub.
