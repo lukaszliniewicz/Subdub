@@ -381,37 +381,60 @@ def get_deepl_language_code(language: str) -> str:
 
 def translate_blocks_deepl(translation_blocks: List[List[Dict]], source_lang: str, target_lang: str, auth_key: str) -> List[Dict[str, Union[str, List[str]]]]:
     translator = deepl.Translator(auth_key)
-    texts_to_translate = []
-    original_indices = []
-    current_segment = []
     
-    for block in translation_blocks:
-        for subtitle in block:
-            current_segment.append(subtitle)
-            if subtitle['text'].strip().endswith(('.', '!', '?', '。')) or len(current_segment) == 4:
-                text = ' '.join([s['text'] for s in current_segment])
-                texts_to_translate.append(text)
-                original_indices.append([s['index'] for s in current_segment])
-                current_segment = []
-        
-        if current_segment:  # Handle any remaining subtitles
-            text = ' '.join([s['text'] for s in current_segment])
-            texts_to_translate.append(text)
-            original_indices.append([s['index'] for s in current_segment])
-            current_segment = []
+    # Combine all subtitles into a single text, separated by double newlines
+    full_text = "\n\n".join(["\n\n".join([sub['text'] for sub in block]) for block in translation_blocks])
+    
+    # Check if the text exceeds 120kb
+    if len(full_text.encode('utf-8')) > 120 * 1024:
+        # Split the text if it's too large
+        split_texts = []
+        current_text = ""
+        for block in translation_blocks:
+            block_text = "\n\n".join([sub['text'] for sub in block])
+            if len((current_text + "\n\n" + block_text).encode('utf-8')) > 120 * 1024:
+                split_texts.append(current_text)
+                current_text = block_text
+            else:
+                current_text += "\n\n" + block_text if current_text else block_text
+        if current_text:
+            split_texts.append(current_text)
+    else:
+        split_texts = [full_text]
     
     # Convert target language to DeepL-specific code
     deepl_target_lang = get_deepl_language_code(target_lang)
     
-    # Translate all texts at once
-    results = translator.translate_text(texts_to_translate, target_lang=deepl_target_lang, preserve_formatting=True)
+    # Translate all texts
+    translated_texts = []
+    for text in split_texts:
+        result = translator.translate_text(text, 
+                                           target_lang=deepl_target_lang, 
+                                           #split_sentences='nonewlines', 
+                                           )
+        translated_texts.append(result.text)
+    
+    # Combine translated texts
+    full_translated_text = "\n\n".join(translated_texts)
+    
+    # Split the translated text back into blocks and subtitles
+    translated_blocks = full_translated_text.split("\n\n")
     
     translated_responses = []
-    for translated_text, indices in zip(results, original_indices):
+    subtitle_index = 0
+    for block in translation_blocks:
+        block_translations = []
+        for _ in range(len(block)):
+            if subtitle_index < len(translated_blocks):
+                block_translations.append(translated_blocks[subtitle_index])
+                subtitle_index += 1
+            else:
+                break
+        
         translated_responses.append({
-            "translation": [translated_text.text],
+            "translation": block_translations,
             "new_glossary": "",
-            "original_indices": indices
+            "original_indices": [sub['index'] for sub in block]
         })
     
     return translated_responses
@@ -421,51 +444,19 @@ def parse_deepl_response(translated_blocks: List[Dict[str, Union[str, List[str]]
     translated_subtitles = []
     
     for block in translated_blocks:
-        translated_text = block['translation'][0]
-        indices = block['original_indices']
-        
-        # Split the translated text based on the number of original subtitles
-        split_translations = split_translation(translated_text, [len(original_subtitles[i-1].content) for i in indices])
-        
-        for subtitle_text, orig_index in zip(split_translations, indices):
+        for translated_text, orig_index in zip(block['translation'], block['original_indices']):
             orig = original_subtitles[orig_index - 1]
             translated_subtitles.append(srt.Subtitle(
                 index=orig_index,
                 start=orig.start,
                 end=orig.end,
-                content=subtitle_text.strip()
+                content=translated_text.strip()
             ))
     
     # Sort subtitles by their original index to maintain order
     translated_subtitles.sort(key=lambda x: x.index)
     
     return srt.compose(translated_subtitles)
-
-def split_translation(translated_text: str, original_lengths: List[int]) -> List[str]:
-    words = translated_text.split()
-    result = []
-    current_subtitle = ""
-    word_index = 0
-    total_original_length = sum(original_lengths)
-    
-    for original_length in original_lengths:
-        target_length = int(len(translated_text) * (original_length / total_original_length))
-        
-        while len(current_subtitle) < target_length and word_index < len(words):
-            if len(current_subtitle) + len(words[word_index]) > target_length and current_subtitle:
-                break
-            current_subtitle += words[word_index] + " "
-            word_index += 1
-        
-        result.append(current_subtitle.strip())
-        current_subtitle = ""
-    
-    # Add any remaining words to the last subtitle
-    while word_index < len(words):
-        result[-1] += " " + words[word_index]
-        word_index += 1
-    
-    return result
 
 def parse_translated_response(translated_blocks: List[Dict[str, Union[str, List[str]]]], original_srt: str) -> str:
     original_subtitles = list(srt.parse(original_srt))
