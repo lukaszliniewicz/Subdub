@@ -36,13 +36,13 @@ TRANSLATION_PROMPT_TEMPLATE = """Your task: translate machine-generated subtitle
 Instructions:
 1. You will receive an array of subtitles in JSON format.
 2. Translate each subtitle, maintaining the EXACT SAME array structure.
-3. If a subtitle should be removed (e.g., it contains only filler words or is redundant, or you are confident it is a hallucination of the STT model), replace its text with "[REMOVE]".
+3. If a subtitle should be removed (e.g., it contains only filler words or you are confident it is a hallucination of the STT model), replace its text with "[REMOVE]".
 4. Spell out numbers, especially Roman numerals, dates, amounts etc.
 5. Write names, brands, acronyms, abbreviations, and foreign words phonetically in the target language.
-6. Choose concise translations suitable for dubbing while maintaining accuracy and corectness.
+6. Choose concise translations suitable for dubbing while maintaining accuracy of the content, corectness and the tone of the source.
 7. Use correct punctuation that enhances a natural fow of speech for optimal speech generation.
 8. Do not add ANY comments, confirmations, explanations, or questions. This is PARTICULARLY IMPORTANT: output only the translation formatted like the original JSON array. Do not change the format. Do not add unneccesary comments or remarks.
-10. Before outputting your answer, validate its formatting. 
+10. Before outputting your answer, validate its formatting and consider the source text very carefully. 
 
 {glossary_instructions}"""
 
@@ -65,12 +65,12 @@ These are your instructions. Follow them closely. Make sure you follow all of th
 
 1. You will receive two JSON arrays: original subtitles and the original translation of those subtitles.
 2. Review the translation for accuracy, fluency, and suitability for dubbing.
-3. Improve the translations where necessary. Be guided by the original translation instructions.
+3. Improve the translations where necessary. Be guided by the original translation instructions. Do not find faults where there are none. It's perfectly find to output the original stranslated subtaites with no changes.
 4. THE ABSOLUTE IMPERATIVE YOU MUST ADHERE TO: Maintain the JSON array structure of the input you received and output ONLY the reviewed translation. THE NUMBER OF ITEMS IN THE ARRAY AND THE FORMATTING OF THE ARRAY MUST BE THE SAME AS IN THE ORIGINAL SUBTITLES. If the original subtitle array contains 7 items, you must output 7 subtitles; if it contains 8, you must output 8. This is crucial to the success of your task. You don't outpu the original subtitle, JUST THE REVIEWD TRANSLATION.
 5. For subtitles marked as "[REMOVE]":
    - If you agree it should be removed, keep "[REMOVE]" in your output for that subtitle.
    - If you think it should be kept, provide your translation instead of "[REMOVE]".
-6. Before outputting your answer, validate its formatting. 
+6. Before outputting your answer, validate its formatting and consider all the data you were given very carefully. 
 
 Reminder: adhere to the formatting of your output as JSON and output the exact same number of subtitles. Example: Original subtitles: ["I am hungry.", "So am I."]; Original translation: ["Jestem głodny.", "Ja teeeż."]; Your output: ["Jestem głodny.", "Ja też."]
 
@@ -1054,6 +1054,10 @@ def sync_audio_video(session_folder: str) -> None:
     final_output_path = mix_audio_tracks(video_path, aligned_audio_path, session_folder, video_name, xtts_languages[speech_blocks_language], False)
     logging.info(f"Final output saved: {final_output_path}")
 
+def perform_equalization(input_srt_path, output_srt_path, max_line_length):
+    """Performs SRT equalization on the given input file."""
+    equalize_srt(input_srt_path, output_srt_path, max_line_length)
+
 def main():
     parser = argparse.ArgumentParser(description="Video subtitle translation and dubbing tool")
     parser.add_argument('-i', '--input', help="Input video path or URL")
@@ -1070,7 +1074,7 @@ def main():
     parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4o', 'gpt-4o-mini'], help="LLM model to use (default: sonnet for Anthropic, gpt-4o-mini for OpenAI)")
     parser.add_argument('-session', help="Session name or path. If not provided, a new session folder will be created.")
     parser.add_argument('-merge_threshold', type=int, default=SPEECH_BLOCK_MERGE_THRESHOLD, help=f"Maximum time difference (in ms) between subtitles to be merged (default: {SPEECH_BLOCK_MERGE_THRESHOLD})")
-    parser.add_argument('-task', choices=['tts', 'full', 'transcribe', 'translate', 'speech_blocks', 'sync'], default='full', help="Task to perform (default: full)")
+    parser.add_argument('-task', choices=['tts', 'full', 'transcribe', 'translate', 'speech_blocks', 'sync', 'equalize'], default='full', help="Task to perform (default: full)")    
     parser.add_argument('-t_prompt', help="Custom translation prompt")
     parser.add_argument('-eval_prompt', help="Custom evaluation prompt")
     parser.add_argument('-gloss_prompt', help="Custom glossary prompt")
@@ -1078,7 +1082,7 @@ def main():
     parser.add_argument('-equalize', action='store_true', help="Apply SRT equalizer to the final subtitle file")
     parser.add_argument('-max_line_length', type=int, default=42, help="Maximum line length for SRT equalization (default: 60)")
     parser.add_argument('-api_deepl', help="DeepL API key")
-
+    parser.add_argument('-characters', type=int, default=60, help="Maximum line length for SRT equalization (default: 60)")  # New argument
     args = parser.parse_args()
     # Check if input is required based on the task
     
@@ -1103,6 +1107,19 @@ def main():
         args.api_deepl = args.api_deepl or os.environ.get('DEEPL_API_KEY') or input("Please enter your DeepL API key: ")
     else:
         raise ValueError(f"Unsupported LLM API: {args.llmapi}")
+
+        # Check for equalization task
+    if args.task == 'equalize':
+        if not args.input:
+            parser.error("the following arguments are required for 'equalize' task: -i/--input")
+
+        input_srt_path = os.path.abspath(os.path.expanduser(args.input))
+        output_srt_path = os.path.splitext(input_srt_path)[0] + "_equalized.srt"  # Create output filename
+
+        logging.info(f"Performing SRT equalization on: {input_srt_path}")
+        perform_equalization(input_srt_path, output_srt_path, args.characters)
+        logging.info(f"Equalized SRT file saved as: {output_srt_path}")
+        return  # Exit after equalization
 
     if args.task == 'sync':
         if not args.session:
