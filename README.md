@@ -33,7 +33,7 @@ https://github.com/user-attachments/assets/1ba8068d-986e-4dec-a162-3b7cc49052f4
 Basic usage:
 `python Subdub.py -i [input_file] -sl [source_language] -tl [target_language] -task [task_name] -tts_voice [path to a 6-12s 22050hz mono .wav file]`
 
-If you want to perform translation, you need to have an Anthropic, OpenAI or DeepL API key and provide it as an argument. Using the local LLM API (Text Generation WebUI's) doesn't require an api key. You can also set the keys as environmental values (OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPL_API_KEY).  
+If you want to perform translation, you need to have an Anthropic, OpenAI or DeepL API key and provide it as an argument. Using the local LLM API (Text Generation WebUI's) doesn't require an api key. You can also set the keys as environmental variables (OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPL_API_KEY).  
 
 ## Tasks
 
