@@ -2,6 +2,10 @@
 
 Subdub is a command-line tool for translating video subtitles and generating dubbed audio. It was created to enhance the dubbing functionality of [Pandrator](https://github.com/lukaszliniewicz/pandrator), but can be used on its own, albeit with limited functionality. Pandrator provides a GUI that makes it possible to preview, edit, and regenerate subtitle audio before aligning and synchronising it, as well as manage the entire workflow.
 
+Dubbing sample, including translation ([video source](https://www.youtube.com/watch?v=_SwUpU0E2Eg&t=61s&pp=ygUn0LLRi9GB0YLRg9C_0LvQtdC90LjQtSDQu9C10LPQsNGB0L7QstCw)):
+
+https://github.com/user-attachments/assets/1ba8068d-986e-4dec-a162-3b7cc49052f4
+
 ## Table of Contents
 1. [Installation](#installation)
 2. [Usage](#usage)
