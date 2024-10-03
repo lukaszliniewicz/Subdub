@@ -249,29 +249,46 @@ def transcribe_audio(audio_path: str, language: str, session_folder: str, video_
 
 def create_translation_blocks(srt_content: str, char_limit: int, source_language: str) -> List[List[Dict]]:
     # Adjust character limit for Chinese and Japanese
-    if source_language.lower() in ['chinese', 'japanese']:
+    if source_language.lower() in ['chinese', 'japanese', 'ja', 'zh', 'zh-cn', 'zh-tw']:
         char_limit = math.floor(char_limit / 3)
+
+    # Define sentence-ending patterns for different languages
+    sentence_endings = {
+        'default': ('.', '!', '?'),
+        'japanese': ('。', '！', '？', 'か', 'ね', 'よ', 'わ'),
+        'chinese': ('。', '！', '？', '…')
+    }
+
+    if source_language.lower() in ['japanese', 'ja']:
+        endings = sentence_endings['japanese']
+    elif source_language.lower() in ['chinese', 'zh', 'zh-cn', 'zh-tw']:
+        endings = sentence_endings['chinese']
+    else:
+        endings = sentence_endings['default']
 
     subtitles = list(srt.parse(srt_content))
     blocks = []
     current_block = []
     current_char_count = 0
 
+    def is_sentence_ending(text: str) -> bool:
+        return any(text.strip().endswith(ending) for ending in endings)
+
     for i, subtitle in enumerate(subtitles):
         if current_char_count + len(subtitle.content) > char_limit:
             # We've exceeded the limit, so we need to find a good breaking point
-            if current_block[-1]['text'].strip().endswith(('.', '!', '?')):
-                # The last subtitle that fits ends with sentence-ending punctuation
+            if is_sentence_ending(current_block[-1]['text']):
+                # The last subtitle that fits ends with sentence-ending punctuation or word
                 blocks.append(current_block)
             else:
-                # Look backwards for the last subtitle with sentence-ending punctuation
+                # Look backwards for the last subtitle with sentence-ending punctuation or word
                 for j in range(len(current_block) - 1, -1, -1):
-                    if current_block[j]['text'].strip().endswith(('.', '!', '?', '。')):
+                    if is_sentence_ending(current_block[j]['text']):
                         blocks.append(current_block[:j+1])
                         current_block = current_block[j+1:]
                         break
                 else:
-                    # If no sentence-ending punctuation found, use all accumulated subtitles
+                    # If no sentence-ending found, use all accumulated subtitles
                     blocks.append(current_block)
 
             # Start a new block
@@ -909,7 +926,7 @@ def align_audio_blocks(alignment_blocks: List[Dict], session_folder: str) -> str
             if os.path.exists(wav_path):
                 wav_audio = AudioSegment.from_wav(wav_path)
                 if len(block_audio) > 0:
-                    block_audio += AudioSegment.silent(duration=400)
+                    block_audio += AudioSegment.silent(duration=100)
                 block_audio += wav_audio
             else:
                 logging.error(f"Audio file not found: {wav_path}")
@@ -935,27 +952,51 @@ def align_audio_blocks(alignment_blocks: List[Dict], session_folder: str) -> str
 
 def mix_audio_tracks(video_path: str, synced_audio_path: str, session_folder: str, video_name: str, target_language: str, evaluated: bool = False) -> str:
     evaluation_suffix = "_eval" if evaluated else ""
+    mixed_audio_path = os.path.join(session_folder, f"mixed_audio{evaluation_suffix}.wav")
     output_path = os.path.join(session_folder, f"final_output{evaluation_suffix}.mp4")
-    subtitles_path = os.path.join(session_folder, f"{video_name}_{target_language}{evaluation_suffix}.srt")
-    ffmpeg_command = [
+
+    # Extract original audio
+    original_audio_path = os.path.join(session_folder, "original_audio.wav")
+    extract_audio_command = [
         'ffmpeg',
         '-i', video_path,
+        '-vn', '-acodec', 'pcm_s16le',
+        '-ar', '44100', '-ac', '2',
+        original_audio_path
+    ]
+    subprocess.run(extract_audio_command, check=True)
+
+    # Mix audio tracks
+    ffmpeg_command = [
+        'ffmpeg',
+        '-i', original_audio_path,
         '-i', synced_audio_path,
         '-filter_complex',
         "[1]silencedetect=n=-30dB:d=2[silence];"
         "[silence]aformat=sample_fmts=u8:sample_rates=44100:channel_layouts=mono,"
         "aresample=async=1000,pan=1c|c0=c0,"
         "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=mono[silence_mono];"
-        "[0][silence_mono]sidechaincompress=threshold=0.02:ratio=20:attack=100:release=500:makeup=1.2[gated];"
+        "[0][silence_mono]sidechaincompress=threshold=0.02:ratio=20:attack=100:release=500:makeup=1[gated];"
         "[1]volume=2[subtitles];"
         "[gated][subtitles]amix=inputs=2[mixed]",
-        '-map', '0:v',
         '-map', '[mixed]',
-        '-c:v', 'libx264',
-        '-c:a', 'aac',
-        output_path
+        mixed_audio_path
     ]
     subprocess.run(ffmpeg_command, check=True)
+
+    # Replace audio in video
+    replace_audio_command = [
+        'ffmpeg',
+        '-i', video_path,
+        '-i', mixed_audio_path,
+        '-c:v', 'copy', 
+        '-c:a', 'aac',   
+        '-map', '0:v',   
+        '-map', '1:a',   
+        output_path
+    ]
+    subprocess.run(replace_audio_command, check=True)
+
     return output_path
 
 def cleanup_temp_files(session_folder: str, task: str) -> None:
