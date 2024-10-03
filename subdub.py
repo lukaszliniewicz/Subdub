@@ -39,7 +39,7 @@ Instructions:
 3. If a subtitle should be removed (e.g., it contains only filler words or you are confident it is a hallucination of the STT model), replace its text with "[REMOVE]".
 4. Spell out numbers, especially Roman numerals, dates, amounts etc.
 5. Write names, brands, acronyms, abbreviations, and foreign words phonetically in the target language.
-6. Choose concise translations suitable for dubbing while maintaining accuracy of the content, corectness and the tone of the source.
+6. Choose concise translations suitable for dubbing while maintaining accuracy, grammatical corectness in the target language and the tone of the source.
 7. Use correct punctuation that enhances a natural fow of speech for optimal speech generation.
 8. Do not add ANY comments, confirmations, explanations, or questions. This is PARTICULARLY IMPORTANT: output only the translation formatted like the original JSON array. Do not change the format. Do not add unneccesary comments or remarks.
 10. Before outputting your answer, validate its formatting and consider the source text very carefully. 
