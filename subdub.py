@@ -950,8 +950,10 @@ def align_audio_blocks(alignment_blocks: List[Dict], session_folder: str) -> str
     final_audio.export(output_path, format="wav")
     return output_path
 
+
 def mix_audio_tracks(video_path: str, synced_audio_path: str, session_folder: str, video_name: str, target_language: str, evaluated: bool = False) -> str:
     evaluation_suffix = "_eval" if evaluated else ""
+    amplified_dubbed_audio_path = os.path.join(session_folder, f"amplified_dubbed_audio{evaluation_suffix}.wav")
     mixed_audio_path = os.path.join(session_folder, f"mixed_audio{evaluation_suffix}.wav")
     output_path = os.path.join(session_folder, f"final_output{evaluation_suffix}.mp4")
 
@@ -966,11 +968,38 @@ def mix_audio_tracks(video_path: str, synced_audio_path: str, session_folder: st
     ]
     subprocess.run(extract_audio_command, check=True)
 
+    # Analyze dubbed audio to find max volume
+    analyze_command = [
+        'ffmpeg',
+        '-i', synced_audio_path,
+        '-af', 'volumedetect',
+        '-vn', '-sn', '-dn',
+        '-f', 'null',
+        '/dev/null'
+    ]
+    result = subprocess.run(analyze_command, capture_output=True, text=True, check=True)
+    
+    # Extract max_volume from the output
+    max_volume_line = [line for line in result.stderr.split('\n') if 'max_volume' in line][0]
+    max_volume = float(max_volume_line.split(':')[1].strip().split()[0])
+    
+    # Calculate required amplification
+    amplification = -max_volume
+
+    # Amplify dubbed audio
+    amplify_command = [
+        'ffmpeg',
+        '-i', synced_audio_path,
+        '-af', f'volume={amplification}dB',
+        amplified_dubbed_audio_path
+    ]
+    subprocess.run(amplify_command, check=True)
+
     # Mix audio tracks
     ffmpeg_command = [
         'ffmpeg',
         '-i', original_audio_path,
-        '-i', synced_audio_path,
+        '-i', amplified_dubbed_audio_path,
         '-filter_complex',
         "[1]silencedetect=n=-30dB:d=2[silence];"
         "[silence]aformat=sample_fmts=u8:sample_rates=44100:channel_layouts=mono,"
