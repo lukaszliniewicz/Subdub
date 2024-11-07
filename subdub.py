@@ -1005,7 +1005,7 @@ def mix_audio_tracks(video_path: str, synced_audio_path: str, session_folder: st
         "[silence]aformat=sample_fmts=u8:sample_rates=44100:channel_layouts=mono,"
         "aresample=async=1000,pan=1c|c0=c0,"
         "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=mono[silence_mono];"
-        "[0][silence_mono]sidechaincompress=threshold=0.02:ratio=20:attack=100:release=500:makeup=1[gated];"
+        "[0][silence_mono]sidechaincompress=threshold=0.01:ratio=20:attack=100:release=500:makeup=1[gated];"
         "[1]volume=2[subtitles];"
         "[gated][subtitles]amix=inputs=2[mixed]",
         '-map', '[mixed]',
@@ -1063,7 +1063,7 @@ def create_speech_blocks_json(srt_file: str, session_folder: str, merge_threshol
 def normalize_filename(filename):
     return unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
 
-def sync_audio_video(session_folder: str) -> None:
+def sync_audio_video(session_folder: str, input_video: str = None) -> None:
     # Define XTTS language codes
     xtts_languages = {
         "en": "English", "es": "Spanish", "fr": "French", "de": "German",
@@ -1074,11 +1074,15 @@ def sync_audio_video(session_folder: str) -> None:
 
     logging.info(f"Contents of session folder: {os.listdir(session_folder)}")
 
-    # Find the newest video file that is not the output file
-    video_files = [f for f in os.listdir(session_folder) if f.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')) and not f.startswith('final_output')]
-    if not video_files:
-        raise ValueError("No video file found in the session folder")
-    video_path = os.path.join(session_folder, max(video_files, key=lambda f: os.path.getmtime(os.path.join(session_folder, f))))
+    # First try to use the specified input video if provided
+    if input_video and os.path.exists(input_video):
+        video_path = input_video
+    else:
+        # Fall back to finding the newest video file
+        video_files = [f for f in os.listdir(session_folder) if f.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')) and not f.startswith('final_output')]
+        if not video_files:
+            raise ValueError("No video file found in the session folder")
+        video_path = os.path.join(session_folder, max(video_files, key=lambda f: os.path.getmtime(os.path.join(session_folder, f))))
     
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     
@@ -1153,6 +1157,8 @@ def main():
     parser.add_argument('-max_line_length', type=int, default=42, help="Maximum line length for SRT equalization (default: 60)")
     parser.add_argument('-api_deepl', help="DeepL API key")
     parser.add_argument('-characters', type=int, default=60, help="Maximum line length for SRT equalization (default: 60)")  # New argument
+    parser.add_argument('-v', '--video', help="Input video file for syncing (optional)")
+    
     args = parser.parse_args()
     # Check if input is required based on the task
     
@@ -1194,9 +1200,9 @@ def main():
     if args.task == 'sync':
         if not args.session:
             raise ValueError("Session folder must be specified for the 'sync' task")
-        sync_audio_video(args.session)
+        sync_audio_video(args.session, args.video)
         logging.info("Synchronization completed. Ending process.")
-        return    
+        return 
 
     # Check if the input is a URL
     if args.input.startswith(('http://', 'https://', 'www.')):
