@@ -1171,7 +1171,7 @@ def main():
     if args.llmapi == 'anthropic':
         if not args.llm_model or args.llm_model not in ['haiku', 'sonnet']:
             args.llm_model = 'sonnet'
-        model = "claude-3-haiku-20240307" if args.llm_model == 'haiku' else "claude-3-5-sonnet-20240620"
+        model = "claude-3-5-haiku-latest" if args.llm_model == 'haiku' else "claude-3-5-sonnet-latest"
     elif args.llmapi == 'openai':
         if not args.llm_model or args.llm_model not in ['gpt-4o', 'gpt-4o-mini']:
             args.llm_model = 'gpt-4o-mini'
