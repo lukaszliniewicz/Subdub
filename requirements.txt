@@ -1,8 +1,8 @@
-requests
-pydub
-srt
-anthropic
-openai
-yt-dlp
-srt-equalizer
-deepl
+requests==2.32.3
+pydub==0.25.1
+srt==3.5.3
+anthropic==0.49.0
+openai==1.60.2
+yt_dlp==2025.1.26
+srt_equalizer==0.1.10
+deepl==1.21.0
