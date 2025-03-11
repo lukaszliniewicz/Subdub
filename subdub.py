@@ -22,10 +22,19 @@ from srt_equalizer import srt_equalizer
 import unicodedata
 import deepl
 
+#Ideas
+#Add previous corrected / translated segment to context 
+#Experiment with the validation in chain of thought
+#Add numbering to subtitles
+#Try CSV instead of JSON
+#Implement openrouter
+#Write app to compare / edit subtitles and their translation, including splitting, removing with renumbering, consider including in Pandrator flow?
+#Improve glossary workflow, enable passing a csv file
+#Improve handling of Japanese subtitles (character limit etc.)
 
 # Constants
-MAX_RETRIES = 2
-CHAR_LIMIT_DEFAULT = 4000
+MAX_RETRIES = 3
+CHAR_LIMIT_DEFAULT = 2000
 SPEECH_BLOCK_CHAR_LIMIT = 160
 SPEECH_BLOCK_MIN_CHARS = 20
 SPEECH_BLOCK_MERGE_THRESHOLD = 1  # ms
@@ -43,8 +52,26 @@ Instructions:
 7. Use correct punctuation that enhances a natural fow of speech for optimal speech generation.
 8. Do not add ANY comments, confirmations, explanations, or questions. This is PARTICULARLY IMPORTANT: output only the translation formatted like the original JSON array. Do not change the format. Do not add unneccesary comments or remarks.
 10. Before outputting your answer, validate its formatting and consider the source text very carefully. 
+"""
 
-{glossary_instructions}"""
+TRANSLATION_PROMPT_TEMPLATE_COT = """Your task: translate machine-generated subtitles from {source_lang} to {target_lang}. Draft your response first inside <draft></draft> tags, then analyse it inside <analysis></analysis> tags, paying attention especially to whether the number of output subtitles matches and/or [REMOVE] tags matches the number of input subtitles, and output the validated response within <final></final> tags. Make sure to close all tags.
+
+Instructions:
+1. You will receive an array of subtitles in JSON format.
+2. Translate each subtitle, maintaining the EXACT SAME array structure.
+3. If a subtitle should be removed (e.g., it contains only filler words or you are confident it is a hallucination of the STT model), replace its text with "[REMOVE]".
+4. Spell out numbers, especially Roman numerals, dates, amounts etc.
+5. Write names, brands, acronyms, abbreviations, and foreign words phonetically in the target language.
+6. Choose concise translations suitable for dubbing while maintaining accuracy, grammatical corectness in the target language and the tone of the source.
+7. Use correct punctuation that enhances a natural fow of speech for optimal speech generation.
+8. Do not add ANY comments, confirmations, explanations, or questions. This is PARTICULARLY IMPORTANT: output only the translation formatted like the original JSON array. Do not change the format. Do not add unneccesary comments or remarks.
+10. Before outputting your answer, validate its formatting and consider the source text very carefully. 
+"""
+
+CONTEXT_PROMPT_TEMPLATE = """
+For additional context, this is the final vrsion of the previous susbtitle block processed by you before:
+{context_previous_response}
+"""
 
 GLOSSARY_INSTRUCTIONS_TRANSLATION = """
 Use the following glossary. Apply it flexibly, considering different forms of speech parts, like declination and conjugation. The purpuse of it is to make the translation coherent:
@@ -65,7 +92,7 @@ These are your instructions. Follow them closely. Make sure you follow all of th
 
 1. You will receive two JSON arrays: original subtitles and the original translation of those subtitles.
 2. Review the translation for accuracy, fluency, and suitability for dubbing.
-3. Improve the translations where necessary. Be guided by the original translation instructions. Do not find faults where there are none. It's perfectly find to output the original stranslated subtaites with no changes.
+3. Improve the translations where necessary. Be guided by the original translation instructions. Do not find faults where there are none. It's perfectly fine to output the original translated subtaites with no changes.
 4. THE ABSOLUTE IMPERATIVE YOU MUST ADHERE TO: Maintain the JSON array structure of the input you received and output ONLY the reviewed translation. THE NUMBER OF ITEMS IN THE ARRAY AND THE FORMATTING OF THE ARRAY MUST BE THE SAME AS IN THE ORIGINAL SUBTITLES. If the original subtitle array contains 7 items, you must output 7 subtitles; if it contains 8, you must output 8. This is crucial to the success of your task. You don't outpu the original subtitle, JUST THE REVIEWD TRANSLATION.
 5. For subtitles marked as "[REMOVE]":
    - If you agree it should be removed, keep "[REMOVE]" in your output for that subtitle.
@@ -84,7 +111,76 @@ Below you will find:
 2. The initial translation in {target_lang} (JSON array)
 """
 
-CUSTOM_SYSTEM_PROMPT = "You are an experienced translator and text editor proficient in multiple languages. You pay great attention to detail and analyse the instructions you are given very carefully. You return ONLY the translation or text requested of you in the requested format (a JSON array formatted as the input you receive), without any comments, acknowledgments, remarks, questions etc."
+CORRECTION_PROMPT_TEMPLATE = """
+Your Instructions:
+1. You will receive an array of subtitles. Your task is to correct them
+2. Fix punctuation and capitalization such that they are coherent and logical, also between subsequent subtitles 
+3. Correct spelling and obvious transcription errors
+4. Preserve all meaning and content (you should remove filler words, though)
+5. Return the corrected subtitles in the EXACT SAME array structure with the SAME number of items, including subtitles that you didn't change
+6. Do not assume that something needs correcting just because you were asked to consider correcting it, make sure that it really does need correcting
+7. DO NOT split or merge subtitles
+
+Additional context and instructions specific to your particular batch, if any:
+{correction_instructions}
+
+Remember, validate your output carefully before returning it. Your most important instruction: the number of corrected items in the output array MUST match the number of items received in the input array, it is IMPERATIVE.
+"""
+
+CORRECTION_PROMPT_TEMPLATE_COT = """
+You will receive an array of subtitles. Your task is to correct them.
+
+1. Draft your response first inside <draft></draft> tags, then check it inside <analysis></analysis> tags, especially whether the number of output subtitles matches the number of input subtitles, and output the validated response within <final></final> tags. Make sure to close the tags.
+2. Fix punctuation and capitalization such that they are coherent and logical, also between subsequent subtitles 
+3. Correct spelling and obvious transcription errors
+4. Preserve all meaning and content, also stylistic phrases, even if not key to the meaning (you should remove filler words - like "um" - and obvious repetitions - like "it is, it is..." though)
+5. Return the corrected subtitles in the EXACT SAME array structure with the SAME number of items, including subtitles that you didn't change 
+6. Do not assume that something needs correcting just because you were asked to consider correcting it, make sure that it really does need correcting
+7. DO NOT split or merge subtitles
+
+Additional context and instructions specific to your particular batch, if any:
+{correction_instructions}
+
+Remember, validate your output carefully before returning it. Your most important instruction: the number of corrected items in the output array MUST match the number of items received in the input array, it is IMPERATIVE.
+"""
+
+CORRECTION_PROMPT_TEMPLATE3 = """
+Your Instructions:
+1. Draft your response first inside <draft></draft> tags, then check it and output the actual response within <final></final> tags.
+2. You will receive an array of subtitles. Your task is to correct them
+3. Fix punctuation and capitalization such that they are coherent and logical, also between subsequent subtitles 
+4. Correct spelling and obvious transcription errors
+5. Preserve all meaning and content (you should remove filler words, though)
+6. If a subtitle should be removed (and that would be ONLY if it contains only OBVIOUS filler words or gibberish), replace its text with "[REMOVE]" in your output to maintain the same number of items in the array
+7. Return the corrected subtitles in the EXACT SAME array structure with the SAME number of items, including subtitles that you didn't change and "[REMOVE]" statements 
+8. Do not assume that something needs correcting just because you were asked to consider correcting it, make sure that it really does need correcting
+9. DO NOT split or merge subtitles
+
+Additional context and instructions specific to your particular batch, if any:
+{correction_instructions}
+
+Remember, validate your output carefully before returning it. Your most important instruction: the number of corrected items in the output array MUST match the number of items received in the input array, it is IMPERATIVE.
+"""
+
+CORRECTION_EVALUATION_PROMPT_TEMPLATE = """Your task: Review and improve the correction of subtitles in {source_lang} performed by another model.
+
+These are your instructions. Follow them closely:
+
+1. You will receive two JSON arrays: original subtitles and their initial correction.
+2. Review the corrections for accuracy, clarity, and proper language usage.
+3. Improve the corrections where necessary, following the original correction guidelines.
+4. THE ABSOLUTE IMPERATIVE YOU MUST ADHERE TO: Maintain the JSON array structure of the input you received and output ONLY the reviewed correction. THE NUMBER OF ITEMS IN THE ARRAY AND THE FORMATTING OF THE ARRAY MUST BE THE SAME AS IN THE ORIGINAL SUBTITLES.
+5. Before outputting your answer, validate its formatting and consider all the data you were given very carefully.
+
+Original correction guidelines:
+{correction_instructions}
+
+Below you will find:
+1. The original subtitles in {source_lang} (JSON array)
+2. The initial correction in {source_lang} (JSON array)
+"""
+
+CUSTOM_SYSTEM_PROMPT = "You are an experienced translator and text editor proficient in multiple languages. You pay great attention to detail and analyse the instructions you are given very carefully. You return ONLY the translation or corrected text requested of you in the requested format (a JSON array formatted like the input you receive), without any comments, acknowledgments, remarks, questions etc."
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -118,31 +214,166 @@ def equalize_srt(input_srt: str, output_srt: str, max_line_length: int) -> None:
     srt_equalizer.equalize_srt_file(input_srt, output_srt, max_line_length, method='punctuation')
     logging.info(f"SRT equalization completed: {output_srt}")
 
-def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, str]], system_prompt: str = "") -> str:
+def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, str]], 
+                   system_prompt: str = "", provider_params: Dict = None,
+                   use_thinking: bool = False, thinking_tokens: int = 8000) -> str:
+    """
+    Send a request to a language model API and process the response.
+    
+    Args:
+        client: The API client instance
+        llm_api: Which API to use ('anthropic', 'openai', etc.)
+        model: The specific model to use
+        messages: List of message dictionaries to send
+        system_prompt: Optional system prompt for the model
+        provider_params: Optional parameters for OpenRouter API
+        use_thinking: Whether to enable Claude's extended thinking
+        thinking_tokens: Budget for Claude's thinking process
+        
+    Returns:
+        Processed response text
+    """
     try:
+        # Print a divider for better readability
+        print("\n" + "="*80)
+        print("SENDING REQUEST TO LLM API")
+        print("=" * 80)
+        
+        # Only print the last message to avoid redundancy
+        last_message = messages[-1] if messages else {"role": "none", "content": "No message"}
+        print(f"\nLAST MESSAGE:\n{json.dumps(last_message, ensure_ascii=False, indent=2)}")
+        
+        if system_prompt and llm_api != 'openrouter':
+            print(f"\nSYSTEM PROMPT:\n{system_prompt}")
+        
+        # Initialize content to empty string
+        content = ""
+        
         if llm_api == "anthropic":
-            # For Anthropic, we use the system prompt directly and only pass user messages
             user_messages = [msg for msg in messages if msg['role'] == 'user']
-            response = client.messages.create(
-                model=model,
-                max_tokens=4096,
-                temperature=0.7,
-                system=system_prompt,
-                messages=user_messages
-            )
-            content = response.content[0].text if response.content else ""
+            
+            # Build request parameters
+            request_params = {
+                "model": model,
+                "max_tokens": 8000,
+                "temperature": 1,
+                "system": system_prompt,
+                "messages": user_messages
+            }
+            
+            # Add thinking parameter if requested and using Sonnet
+            if use_thinking and "sonnet" in model:
+                try:
+                    print(f"\nENABLING EXTENDED THINKING\nBudget: {thinking_tokens} tokens")
+                    request_params["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": thinking_tokens
+                    }
+                except Exception as e:
+                    print(f"Warning: Could not enable thinking: {str(e)}")
+            
+            # Make the API request with a timeout of 15 minutes
+            print("\nSending request to Anthropic API...")
+            response = client.with_options(timeout=900.0).messages.create(**request_params)
+            
+            # Process and log the response
+            print("\n" + "-"*80)
+            print("RECEIVED ANTHROPIC API RESPONSE")
+            print("-" * 80)
+            
+            # First, extract all thinking blocks and log them
+            thinking_content = []
+            text_content = []
+            
+            if hasattr(response, 'content') and isinstance(response.content, list):
+                for block in response.content:
+                    if hasattr(block, 'type'):
+                        if block.type == "thinking":
+                            thinking_content.append(block.thinking)
+                        elif block.type == "text":
+                            text_content.append(block.text)
+                        elif block.type == "redacted_thinking":
+                            thinking_content.append("[REDACTED THINKING BLOCK]")
+            
+            # Log thinking content if available
+            if thinking_content:
+                print("\nTHINKING PROCESS:")
+                print("-" * 80)
+                for i, thinking in enumerate(thinking_content):
+                    print(f"Thinking Block {i+1}:")
+                    print(thinking)
+                    print("-" * 40)
+            
+            # Extract and combine all text blocks for the final content
+            if text_content:
+                content = "\n".join(text_content)
+                print("\nFINAL RESPONSE:")
+                print("-" * 80)
+                print(content)
+            else:
+                # Fallback in case we don't have text blocks
+                content = ""
+                print("\nWARNING: No text content found in response")
+            
         elif llm_api == "openai":
-            # For OpenAI, we include the system prompt as a message if provided
             openai_messages = messages
             if system_prompt:
                 openai_messages = [{"role": "system", "content": system_prompt}] + openai_messages
+            
+            print("\nSending request to OpenAI API...")
             response = client.chat.completions.create(
                 model=model,
                 messages=openai_messages,
                 temperature=0.7,
-                max_tokens=4096
+                max_tokens=8000
             )
+            
             content = response.choices[0].message.content
+            print("\nOPENAI API RESPONSE:")
+            print("-" * 80)
+            print(content)
+            
+        elif llm_api == "openrouter":
+            import requests
+            
+            openrouter_api = os.environ.get('OPENROUTER_API')
+            headers = {
+                "Authorization": f"Bearer {openrouter_api}",
+                "HTTP-Referer": "http://localhost",
+                "X-Title": "Subtitle Translation App",
+                "Content-Type": "application/json"
+            }
+            
+            # Build request body
+            request_body = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 32000
+            }
+            
+            # Add provider parameters if specified
+            if provider_params:
+                request_body["provider"] = provider_params
+            
+            print("\nSending request to OpenRouter API...")
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=request_body
+            )
+            
+            if response.status_code == 200:
+                content = response.json()["choices"][0]["message"]["content"]
+            else:
+                error_msg = f"OpenRouter API returned status code {response.status_code}: {response.text}"
+                logging.error(error_msg)
+                raise Exception(error_msg)
+            
+            print("\nOPENROUTER API RESPONSE:")
+            print("-" * 80)
+            print(content)
+            
         elif llm_api == "local":
             url = "http://127.0.0.1:5000/v1/chat/completions"
             headers = {"Content-Type": "application/json"}
@@ -165,13 +396,43 @@ def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, s
                 "truncate": 2500,
                 "messages": messages
             }
+            
+            print("\nSending request to Local API...")
             response = requests.post(url, json=data, headers=headers)
             response.raise_for_status()
             content = response.json()['choices'][0]['message']['content']
+            
+            print("\nLOCAL API RESPONSE:")
+            print("-" * 80)
+            print(content)
+            
         else:
             raise ValueError(f"Unsupported LLM API: {llm_api}")
         
+        # Process the content for special formats
+        print("\nPROCESSING RESPONSE...")
+        
+        # First check for <final> tags (for Chain of Thought workflow)
+        if '<final>' in content and '</final>' in content:
+            final_start = content.find('<final>') + len('<final>')
+            final_end = content.find('</final>')
+            if final_start != -1 and final_end != -1:
+                content = content[final_start:final_end].strip()
+                print("\nExtracted <final> content:")
+                print(content)
+        
+        # Then check for JSON array format
+        start_idx = content.find('[')
+        end_idx = content.rfind(']')
+        
+        if start_idx != -1 and end_idx != -1:
+            content = content[start_idx:end_idx+1]
+            print("\nExtracted JSON array:")
+            print(content)
+        
+        print("\n" + "="*80)  # Closing separator
         return content
+        
     except Exception as e:
         logging.error(f"Error in LLM API request: {str(e)}")
         raise
@@ -225,8 +486,7 @@ def extract_audio(video_path: str, session_folder: str, video_name: str) -> str:
 
 def transcribe_audio(audio_path: str, language: str, session_folder: str, video_name: str, whisper_model: str) -> str:
     output_srt = os.path.join(session_folder, f"{video_name}.srt")
-    whisperx_command = [
-        'whisperx',
+    base_whisperx_args = [
         audio_path,
         '--model', whisper_model,
         '--language', language,
@@ -234,13 +494,28 @@ def transcribe_audio(audio_path: str, language: str, session_folder: str, video_
         '--output_dir', session_folder,
         '--print_progress', 'True'
     ]
+
+    # First attempt with direct whisperx command
     try:
+        whisperx_command = ['whisperx'] + base_whisperx_args
+        logging.info("Attempting direct whisperx command...")
         result = subprocess.run(whisperx_command, check=True, capture_output=True)
         if result.stderr:
             logging.warning(f"WhisperX warning: {safe_decode(result.stderr)}")
-    except subprocess.CalledProcessError as e:
-        print(f"WhisperX command failed. Error output:\n{safe_decode(e.stderr)}")
-        raise
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging.warning(f"Direct whisperx command failed, trying conda run method. Error: {str(e)}")
+        try:
+            conda_whisperx_command = [
+                "../conda/Scripts/conda.exe", "run", "-p", "../conda/envs/whisperx_installer", "--no-capture-output",
+                "python", "-m", "whisperx"
+            ] + base_whisperx_args
+            logging.info("Attempting conda run whisperx command...")
+            result = subprocess.run(conda_whisperx_command, check=True, capture_output=True)
+            if result.stderr:
+                logging.warning(f"WhisperX warning: {safe_decode(result.stderr)}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"WhisperX command failed using both methods. Error output:\n{safe_decode(e.stderr)}")
+            raise
     
     whisperx_output = os.path.join(session_folder, f"{os.path.splitext(os.path.basename(audio_path))[0]}.srt")
     os.rename(whisperx_output, output_srt)
@@ -305,31 +580,61 @@ def create_translation_blocks(srt_content: str, char_limit: int, source_language
 
     return blocks
 
-def translate_blocks(translation_blocks: List[List[Dict]], source_lang: str, target_lang: str, anthropic_api_key: str, openai_api_key: str, llm_api: str, glossary: Dict[str, str], use_translation_memory: bool, evaluation_enabled: bool, model: str, translation_prompt: str, glossary_prompt: str, system_prompt: str, deepl_api_key: str = None) -> Tuple[List[Dict[str, Union[str, List[str]]]], Dict[str, str]]:
-    if llm_api == "deepl":
-        return translate_blocks_deepl(translation_blocks, source_lang, target_lang, deepl_api_key), {}
+def translate_blocks(translation_blocks: List[List[Dict]], source_lang: str, target_lang: str,
+                    anthropic_api_key: str, openai_api_key: str, llm_api: str, glossary: Dict[str, str],
+                    use_translation_memory: bool, evaluation_enabled: bool, model: str,
+                    translation_prompt: str, translation_instructions: str, glossary_prompt: str, 
+                    system_prompt: str, use_cot: bool = False, use_context: bool = False,
+                    provider_params: Dict = None, use_thinking: bool = False, 
+                    thinking_tokens: int = 8000) -> Tuple[List[Dict[str, Union[str, List[str]]]], Dict[str, str]]:
+    
     translated_responses = []
     new_glossary = {}
+    previous_response = None
 
-    glossary_instructions = glossary_prompt.format(glossary=json.dumps(glossary, ensure_ascii=False, indent=2)) if use_translation_memory else ""
-    base_prompt = translation_prompt.format(
+    client = None
+    if llm_api == "anthropic":
+        client = Anthropic(api_key=anthropic_api_key)
+    elif llm_api == "openai":
+        client = OpenAI(api_key=openai_api_key)
+    elif llm_api == "openrouter":
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ.get('OPENROUTER_API')
+        )
+    
+    # Build the base prompt
+    base_prompt = (TRANSLATION_PROMPT_TEMPLATE_COT if use_cot else TRANSLATION_PROMPT_TEMPLATE).format(
         source_lang=source_lang,
         target_lang=target_lang,
-        glossary_instructions=glossary_instructions
     )
 
-    client = Anthropic(api_key=anthropic_api_key) if llm_api == "anthropic" else OpenAI(api_key=openai_api_key) if llm_api == "openai" else None
+    # Add custom translation instructions if provided
+    if translation_instructions:
+        base_prompt += f"\n\nAdditional context and instructions:\n{translation_instructions}"
+
+    # Add glossary instructions only if translation memory is enabled
+    if use_translation_memory and glossary_prompt:
+        glossary_instructions = glossary_prompt.format(glossary=json.dumps(glossary, ensure_ascii=False, indent=2))
+        base_prompt += f"\n\n{glossary_instructions}"
 
     for i, block in enumerate(translation_blocks):
         subtitles = json.dumps([sub['text'] for sub in block])
-        final_prompt = f"{base_prompt}\n\nThe subtitles:\n{subtitles}"
+        
+        if use_context and previous_response:
+            context_prompt = CONTEXT_PROMPT_TEMPLATE.format(
+                context_previous_response=previous_response
+            )
+            final_prompt = f"{base_prompt}\n{context_prompt}\n\nThe subtitles:\n{subtitles}"
+        else:
+            final_prompt = f"{base_prompt}\n\nThe subtitles:\n{subtitles}"
 
         for attempt in range(MAX_RETRIES):
             try:
-                messages = [
-                    {"role": "user", "content": final_prompt}
-                ]
-                content = llm_api_request(client, llm_api, model, messages, system_prompt=system_prompt)
+                messages = [{"role": "user", "content": final_prompt}]
+                content = llm_api_request(client, llm_api, model, messages, system_prompt, provider_params, 
+                         use_thinking=use_thinking, thinking_tokens=thinking_tokens)
+                previous_response = content
                 
                 logging.info(f"Complete model output for block {i+1}:\n{content}")
                 
@@ -504,8 +809,32 @@ def evaluate_translation(
     use_translation_memory: bool,
     model: str,
     evaluation_prompt: str,
-    system_prompt: str
+    system_prompt: str,
+    provider_params: Dict = None,
+    use_thinking: bool = False,
+    thinking_tokens: int = 8000
 ) -> Tuple[List[Dict[str, Union[str, List[str]]]], Dict[str, str]]:
+    """
+    Evaluates translations using the specified LLM API.
+    
+    Args:
+        translation_blocks: List of original subtitle blocks
+        full_responses: List of translated responses
+        source_lang: Source language
+        target_lang: Target language
+        anthropic_api_key: Anthropic API key
+        openai_api_key: OpenAI API key
+        llm_api: LLM API to use
+        original_glossary: Original glossary dictionary
+        use_translation_memory: Whether to use translation memory
+        model: Model name to use
+        evaluation_prompt: Evaluation prompt template
+        system_prompt: System prompt
+        provider_params: Optional dictionary of OpenRouter provider parameters
+        
+    Returns:
+        Tuple of evaluated responses and updated glossary
+    """
     evaluated_responses = []
     new_glossary = original_glossary.copy()
 
@@ -521,7 +850,16 @@ def evaluate_translation(
         )
     )
 
-    client = Anthropic(api_key=anthropic_api_key) if llm_api == "anthropic" else OpenAI(api_key=openai_api_key) if llm_api == "openai" else None
+    client = None
+    if llm_api == "anthropic":
+        client = Anthropic(api_key=anthropic_api_key)
+    elif llm_api == "openai":
+        client = OpenAI(api_key=openai_api_key)
+    elif llm_api == "openrouter":
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ.get('OPENROUTER_API')
+        )
 
     for i, (block, full_response) in enumerate(zip(translation_blocks, full_responses)):
         original_subtitles = json.dumps([sub['text'] for sub in block])
@@ -546,7 +884,9 @@ def evaluate_translation(
                 messages = [
                     {"role": "user", "content": prompt}
                 ]
-                content = llm_api_request(client, llm_api, model, messages, system_prompt=system_prompt)
+                content = llm_api_request(client, llm_api, model, messages, system_prompt=system_prompt, 
+                         provider_params=provider_params, use_thinking=use_thinking, 
+                         thinking_tokens=thinking_tokens)
                 
                 # Log the complete model output
                 logging.info(f"Complete model output for evaluation block {i+1}:\n{content}")
@@ -1063,6 +1403,90 @@ def create_speech_blocks_json(srt_file: str, session_folder: str, merge_threshol
 def normalize_filename(filename):
     return unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
 
+def correct_subtitles(
+    translation_blocks: List[List[Dict]],
+    source_lang: str,
+    correction_instructions: str,
+    anthropic_api_key: str,
+    openai_api_key: str,
+    llm_api: str,
+    model: str,
+    correction_prompt: str,
+    system_prompt: str,
+    use_cot: bool = False,
+    use_context: bool = False,
+    provider_params: Dict = None,
+    use_thinking: bool = False,
+    thinking_tokens: int = 8000
+) -> List[Dict[str, Union[str, List[str]]]]:
+    """
+    Corrects subtitles using the specified LLM API.
+    
+    Args:
+        translation_blocks: List of blocks of subtitles to correct
+        source_lang: Source language
+        correction_instructions: Additional correction instructions
+        anthropic_api_key: Anthropic API key
+        openai_api_key: OpenAI API key
+        llm_api: LLM API to use
+        model: Model name to use
+        correction_prompt: Correction prompt template
+        system_prompt: System prompt
+        use_cot: Whether to use chain of thought prompting
+        use_context: Whether to provide context from previous responses
+        provider_params: Optional dictionary of OpenRouter provider parameters
+        
+    Returns:
+        List of corrected responses
+    """
+    corrected_responses = []
+    previous_response = None
+    
+    base_prompt = (CORRECTION_PROMPT_TEMPLATE_COT if use_cot else CORRECTION_PROMPT_TEMPLATE).format(
+        source_lang=source_lang,
+        correction_instructions=correction_instructions if correction_instructions else "No additional instructions provided."
+    )
+
+    client = Anthropic(api_key=anthropic_api_key) if llm_api == "anthropic" else OpenAI(api_key=openai_api_key) if llm_api == "openai" else None
+
+    for i, block in enumerate(translation_blocks):
+        subtitles = json.dumps([sub['text'] for sub in block])
+        
+        if use_context and previous_response:
+            context_prompt = CONTEXT_PROMPT_TEMPLATE.format(
+                context_previous_response=previous_response
+            )
+            final_prompt = f"{base_prompt}\n{context_prompt}\n\nThe subtitles:\n{subtitles}"
+        else:
+            final_prompt = f"{base_prompt}\n\nThe subtitles:\n{subtitles}"
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                messages = [{"role": "user", "content": final_prompt}]
+                content = llm_api_request(client, llm_api, model, messages, system_prompt, 
+                         provider_params=provider_params, use_thinking=use_thinking, 
+                         thinking_tokens=thinking_tokens)
+                previous_response = content
+                
+                try:
+                    corrected_subtitles = json.loads(content)
+                    if len(corrected_subtitles) != len(block):
+                        raise ValueError("Mismatch in subtitle count")
+                    
+                    corrected_responses.append({
+                        "translation": corrected_subtitles,
+                        "original_indices": [sub['index'] for sub in block]
+                    })
+                    break
+                except json.JSONDecodeError:
+                    if attempt == MAX_RETRIES - 1:
+                        raise ValueError(f"Failed to parse JSON response for block {i+1}")
+            except Exception as e:
+                if attempt == MAX_RETRIES - 1:
+                    raise
+
+    return corrected_responses
+
 def sync_audio_video(session_folder: str, input_video: str = None) -> None:
     # Define XTTS language codes
     xtts_languages = {
@@ -1143,12 +1567,12 @@ def main():
     parser.add_argument('-translation_memory', action='store_true', help="Enable translation memory/glossary feature")
     parser.add_argument('-tts_voice', help="Path to TTS voice WAV file")
     parser.add_argument('-whisper_model', choices=['base', 'small', 'small.en', 'medium', 'medium.en', 'large-v2', 'large-v3'], default='large-v2', help="Whisper model to use for transcription (default: large-v2)")
-    parser.add_argument('-llmapi', choices=['anthropic', 'openai', 'local', 'deepl'], default='anthropic', help="LLM API to use (default: anthropic)")
     parser.add_argument('-openai_api', help="OpenAI API key")
-    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4o', 'gpt-4o-mini'], help="LLM model to use (default: sonnet for Anthropic, gpt-4o-mini for OpenAI)")
+    parser.add_argument('-llmapi', choices=['anthropic', 'openai', 'local', 'deepl', 'openrouter'], default='anthropic', help="LLM API to use (default: anthropic)")
+    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4o', 'gpt-4o-mini', 'deepseek-r1', 'qwq-32b', 'deepseek-v3'], help="LLM model to use")
     parser.add_argument('-session', help="Session name or path. If not provided, a new session folder will be created.")
     parser.add_argument('-merge_threshold', type=int, default=SPEECH_BLOCK_MERGE_THRESHOLD, help=f"Maximum time difference (in ms) between subtitles to be merged (default: {SPEECH_BLOCK_MERGE_THRESHOLD})")
-    parser.add_argument('-task', choices=['tts', 'full', 'transcribe', 'translate', 'speech_blocks', 'sync', 'equalize'], default='full', help="Task to perform (default: full)")    
+    parser.add_argument('-task', choices=['tts', 'full', 'transcribe', 'translate', 'speech_blocks', 'sync', 'equalize', 'correct'], default='full', help="Task to perform (default: full)")    
     parser.add_argument('-t_prompt', help="Custom translation prompt")
     parser.add_argument('-eval_prompt', help="Custom evaluation prompt")
     parser.add_argument('-gloss_prompt', help="Custom glossary prompt")
@@ -1156,26 +1580,60 @@ def main():
     parser.add_argument('-equalize', action='store_true', help="Apply SRT equalizer to the final subtitle file")
     parser.add_argument('-max_line_length', type=int, default=42, help="Maximum line length for SRT equalization (default: 60)")
     parser.add_argument('-api_deepl', help="DeepL API key")
-    parser.add_argument('-characters', type=int, default=60, help="Maximum line length for SRT equalization (default: 60)")  # New argument
+    parser.add_argument('-characters', type=int, default=60, help="Maximum line length for SRT equalization (default: 60)")
     parser.add_argument('-v', '--video', help="Input video file for syncing (optional)")
+    parser.add_argument('-correct', action='store_true', help="Enable subtitle correction before translation")
+    parser.add_argument('-correct_prompt', help="Additional context/instructions for subtitle correction (optional)")
+    parser.add_argument('-cot', action='store_true', help="Enable chain-of-thought prompting")
+    parser.add_argument('-context', action='store_true', help="Add previous output as context")
+    parser.add_argument('-translate_prompt', help="Additional context/instructions for translation (optional)")
+    parser.add_argument('-thinking', action='store_true', help="Enable Claude's extended thinking (only for Sonnet model)")
+    parser.add_argument('-thinking_tokens', type=int, default=4000, help="Budget tokens for Claude's extended thinking (default: 4000)")
+    
+    # OpenRouter provider routing arguments
+    parser.add_argument('-provider', help="OpenRouter provider to prioritize (comma-separated, e.g., 'Anthropic,OpenAI')")
+    parser.add_argument('-sort', choices=['price', 'throughput', 'latency'], help="OpenRouter provider sorting strategy")
+    parser.add_argument('-fallbacks', dest='allow_fallbacks', action='store_true', default=True, help="Allow fallbacks to other providers (default: True)")
+    parser.add_argument('-no-fallbacks', dest='allow_fallbacks', action='store_false', help="Disable fallbacks to other providers")
+    parser.add_argument('-ignore', help="OpenRouter providers to ignore (comma-separated list)")
+    parser.add_argument('-data-collection', choices=['allow', 'deny'], default='allow', help="OpenRouter data collection policy")
+    parser.add_argument('-require-parameters', action='store_true', help="Require providers to support all parameters")
     
     args = parser.parse_args()
-    # Check if input is required based on the task
+
+    if args.thinking and (args.llmapi != 'anthropic' or args.llm_model != 'sonnet'):
+        logging.warning("Extended thinking is only available with Claude Sonnet model. Ignoring -thinking parameter.")
+        args.thinking = False
     
     if args.task != 'sync' and not args.input:
         parser.error("the following arguments are required: -i/--input")
-    # Automatically set llmapi to 'openai' if gpt-4o or gpt-4o-mini is selected
+
     if args.llm_model in ['gpt-4o', 'gpt-4o-mini']:
         args.llmapi = 'openai'
+
+    openai_model_mapping = {
+        'gpt-4o': 'chatgpt-4o-latest',
+        'gpt-4o-mini': 'gpt-4o-mini'
+    }
 
     if args.llmapi == 'anthropic':
         if not args.llm_model or args.llm_model not in ['haiku', 'sonnet']:
             args.llm_model = 'sonnet'
-        model = "claude-3-5-haiku-latest" if args.llm_model == 'haiku' else "claude-3-5-sonnet-latest"
+        model = "claude-3-5-haiku-latest" if args.llm_model == 'haiku' else "claude-3-7-sonnet-latest"
     elif args.llmapi == 'openai':
         if not args.llm_model or args.llm_model not in ['gpt-4o', 'gpt-4o-mini']:
             args.llm_model = 'gpt-4o-mini'
-        model = args.llm_model
+        model = openai_model_mapping[args.llm_model]
+    elif args.llmapi == 'openrouter':
+        if not args.llm_model or args.llm_model not in ['deepseek-r1', 'qwq-32b']:
+            args.llm_model = 'deepseek-r1'
+        model = f"deepseek/{args.llm_model}" if args.llm_model == 'deepseek-r1' else f"qwen/{args.llm_model}"
+        
+        # Handle model name shortcuts for OpenRouter
+        if args.sort == 'throughput' and ':nitro' not in model:
+            model += ':nitro'
+        elif args.sort == 'price' and ':floor' not in model:
+            model += ':floor'
     elif args.llmapi == 'local':
         model = None
     elif args.llmapi == 'deepl':
@@ -1184,18 +1642,37 @@ def main():
     else:
         raise ValueError(f"Unsupported LLM API: {args.llmapi}")
 
-        # Check for equalization task
+    # Build OpenRouter provider parameters
+    provider_params = None
+    if args.llmapi == 'openrouter':
+        provider_params = {}
+        if args.provider:
+            provider_params['order'] = [p.strip() for p in args.provider.split(',')]
+        if args.sort and ':nitro' not in model and ':floor' not in model:
+            provider_params['sort'] = args.sort
+        if hasattr(args, 'allow_fallbacks'):
+            provider_params['allow_fallbacks'] = args.allow_fallbacks
+        if args.ignore:
+            provider_params['ignore'] = [p.strip() for p in args.ignore.split(',')]
+        if args.data_collection:
+            provider_params['data_collection'] = args.data_collection
+        if args.require_parameters:
+            provider_params['require_parameters'] = True
+        # Only include non-empty provider_params
+        if not provider_params:
+            provider_params = None
+
     if args.task == 'equalize':
         if not args.input:
             parser.error("the following arguments are required for 'equalize' task: -i/--input")
 
         input_srt_path = os.path.abspath(os.path.expanduser(args.input))
-        output_srt_path = os.path.splitext(input_srt_path)[0] + "_equalized.srt"  # Create output filename
+        output_srt_path = os.path.splitext(input_srt_path)[0] + "_equalized.srt"
 
         logging.info(f"Performing SRT equalization on: {input_srt_path}")
         perform_equalization(input_srt_path, output_srt_path, args.characters)
         logging.info(f"Equalized SRT file saved as: {output_srt_path}")
-        return  # Exit after equalization
+        return
 
     if args.task == 'sync':
         if not args.session:
@@ -1204,7 +1681,6 @@ def main():
         logging.info("Synchronization completed. Ending process.")
         return 
 
-    # Check if the input is a URL
     if args.input.startswith(('http://', 'https://', 'www.')):
         logging.info(f"Detected URL input: {args.input}")
         temp_session_folder = get_or_create_session_folder("temp")
@@ -1229,6 +1705,8 @@ def main():
     logging.info(f"Session folder: {session_folder}")
     logging.info(f"Using LLM API: {args.llmapi}")
     logging.info(f"Using LLM model: {model}")
+    if provider_params:
+        logging.info(f"OpenRouter provider params: {provider_params}")
 
     translation_prompt = args.t_prompt if args.t_prompt else TRANSLATION_PROMPT_TEMPLATE
     evaluation_prompt = args.eval_prompt if args.eval_prompt else EVALUATION_PROMPT_TEMPLATE
@@ -1236,7 +1714,7 @@ def main():
     system_prompt = args.sys_prompt if args.sys_prompt else CUSTOM_SYSTEM_PROMPT
 
     try:
-        if args.task in ['full', 'translate', 'translation']:
+        if args.task in ['full', 'translate', 'translation', 'correct']:
             logging.info(f"Current task: {args.task}")
             logging.info(f"Selected LLM API: {args.llmapi}")
 
@@ -1244,6 +1722,9 @@ def main():
                 args.ant_api = args.ant_api or os.environ.get('ANTHROPIC_API_KEY') or input("Please enter your Anthropic API key: ")
             elif args.llmapi == 'openai':
                 args.openai_api = args.openai_api or os.environ.get('OPENAI_API_KEY') or input("Please enter your OpenAI API key: ")
+            elif args.llmapi == 'openrouter':
+                if not os.environ.get('OPENROUTER_API'):
+                    raise ValueError("OPENROUTER_API environment variable must be set")
             elif args.llmapi == 'local':
                 try:
                     response = requests.get("http://127.0.0.1:5000/v1/models")
@@ -1254,7 +1735,7 @@ def main():
                     logging.error("Please ensure that the Text Generation WebUI is running and accessible at http://127.0.0.1:5000")
                     return
 
-        if video_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
+        if video_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.wav')):
             audio_path = extract_audio(video_path, session_folder, video_name)
             logging.info(f"Audio extracted: {audio_path}")
             srt_path = transcribe_audio(audio_path, args.source_language, session_folder, video_name, args.whisper_model)
@@ -1268,8 +1749,77 @@ def main():
         else:
             raise ValueError("Unsupported input file format. Please provide a video file or an SRT file.")
 
+        # Handle the correct task
+        if args.task == 'correct':
+            logging.info("Starting standalone subtitle correction")
+            translation_blocks = create_translation_blocks(srt_content, args.llm_char, args.source_language)
+            corrected_blocks = correct_subtitles(
+                translation_blocks,
+                args.source_language,
+                args.correct_prompt,
+                args.ant_api,
+                args.openai_api,
+                args.llmapi,
+                model,
+                CORRECTION_PROMPT_TEMPLATE,
+                system_prompt,
+                use_cot=args.cot,
+                use_context=args.context,
+                provider_params=provider_params,
+                use_thinking=args.thinking,
+                thinking_tokens=args.thinking_tokens
+            )
+            logging.info("Correction completed")
+
+            # Save corrected subtitles
+            corrected_srt = parse_translated_response(corrected_blocks, srt_content)
+            corrected_srt_path = os.path.join(session_folder, f"{video_name}_{args.source_language}_corrected.srt")
+            with open(corrected_srt_path, 'w', encoding='utf-8') as f:
+                f.write(corrected_srt)
+            logging.info(f"Corrected subtitles saved: {corrected_srt_path}")
+
+            if args.equalize:
+                output_srt = os.path.join(session_folder, f"{video_name}_{args.source_language}_corrected_final.srt")
+                equalize_srt(corrected_srt_path, output_srt, args.max_line_length)
+                logging.info(f"Equalized corrected subtitles saved: {output_srt}")
+
+            logging.info("Correction task completed. Ending process.")
+            return
+
+        # Handle correction flag for other tasks
+        if args.correct:
+            logging.info("Starting subtitle correction")
+            translation_blocks = create_translation_blocks(srt_content, args.llm_char, args.source_language)
+            corrected_blocks = correct_subtitles(
+                translation_blocks,
+                args.source_language,
+                args.correct_prompt,
+                args.ant_api,
+                args.openai_api,
+                args.llmapi,
+                model,
+                CORRECTION_PROMPT_TEMPLATE,
+                system_prompt,
+                use_cot=args.cot,
+                use_context=args.context,
+                provider_params=provider_params
+            )
+            logging.info("Correction completed")
+
+            # Save corrected subtitles
+            corrected_srt = parse_translated_response(corrected_blocks, srt_content)
+            corrected_srt_path = os.path.join(session_folder, f"{video_name}_{args.source_language}_corrected.srt")
+            with open(corrected_srt_path, 'w', encoding='utf-8') as f:
+                f.write(corrected_srt)
+            logging.info(f"Corrected subtitles saved: {corrected_srt_path}")
+            
+            # Update srt_content to use corrected version for subsequent operations
+            srt_content = corrected_srt
+            # Update srt_path for potential equalization
+            srt_path = corrected_srt_path
+
         if args.task == 'transcribe':
-            logging.info("Transcription completed. Ending process.")
+            logging.info("Transcription/correction completed. Ending process.")
             if args.equalize:
                 output_srt = os.path.join(session_folder, f"{video_name}_{args.source_language}_final.srt")
                 equalize_srt(srt_path, output_srt, args.max_line_length)
@@ -1299,8 +1849,14 @@ def main():
                     args.evaluate,
                     model,
                     translation_prompt,
+                    args.translate_prompt,
                     glossary_prompt,
-                    system_prompt
+                    system_prompt,
+                    use_cot=args.cot,
+                    use_context=args.context,
+                    provider_params=provider_params,
+                    use_thinking=args.thinking,
+                    thinking_tokens=args.thinking_tokens
                 )
                 logging.info("Translation completed")
 
@@ -1322,7 +1878,10 @@ def main():
                         args.translation_memory,
                         model,
                         evaluation_prompt,
-                        system_prompt
+                        system_prompt,
+                        provider_params=provider_params,
+                        use_thinking=args.thinking,
+                        thinking_tokens=args.thinking_tokens
                     )
                     logging.info("Evaluation completed")
                     evaluation_suffix = "_eval"
