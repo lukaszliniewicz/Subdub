@@ -37,65 +37,128 @@ If you want to perform translation, you need to have an Anthropic, OpenAI or Dee
 
 ## Tasks
 
-Subdub offers several task modes to suit different needs:
+Subdub offers several task modes:
 
 ### 1. full
-- **Description**: Performs all steps: transcription, translation, TTS generation, and audio synchronization.
-- **Input**: Video file
-- **Output**: Translated subtitles, TTS audio, and final dubbed video
+- **Description**: Performs the complete pipeline: transcription, translation, TTS generation, and audio synchronization.
+- **Input**: Video file or URL
+- **Output**: Translated subtitles, TTS audio, and final dubbed video with mixed audio
 - **Usage**: `python Subdub.py -i video.mp4 -sl English -tl Spanish -task full`
 
 ### 2. transcribe
-- **Description**: Transcribes the audio from a video file.
-- **Input**: Video file
+- **Description**: Transcribes the audio from a video file using WhisperX.
+- **Input**: Video file or URL
 - **Output**: SRT subtitle file in the source language
-- **Usage**: `python Subdub.py -i video.mp4 -sl English -task transcribe`. You can also specify the whisper model. 
+- **Usage**: `python Subdub.py -i video.mp4 -sl English -task transcribe -whisper_model large-v3`
 
 ### 3. translate
-- **Description**: Translates existing subtitles to the target language.
+- **Description**: Translates existing subtitles to the target language using selected AI model.
 - **Input**: SRT subtitle file
 - **Output**: Translated SRT subtitle file
-- **Usage**: `python Subdub.py -i subtitles.srt -sl English -tl French -task translate`. You can also specify the translation api as well as the model you want to use (for Anthropic and OpenAI). 
+- **Usage**: `python Subdub.py -i subtitles.srt -sl English -tl French -task translate -llmapi anthropic -llm-model sonnet`
 
 ### 4. tts
-- **Description**: Generates Text-to-Speech audio from existing subtitles.
+- **Description**: Generates Text-to-Speech audio from existing subtitles using XTTS.
 - **Input**: SRT subtitle file
-- **Output**: WAV audio files for each subtitle block
+- **Output**: WAV audio files for each speech block
 - **Usage**: `python Subdub.py -i subtitles.srt -tl Spanish -task tts -tts_voice voice.wav`
 
 ### 5. speech_blocks
-- **Description**: Creates speech blocks JSON from subtitles for advanced audio processing.
+- **Description**: Creates optimized speech blocks from subtitles for advanced TTS processing.
 - **Input**: SRT subtitle file
-- **Output**: JSON file containing speech blocks
-- **Usage**: `python Subdub.py -i subtitles.srt -task speech_blocks`
+- **Output**: JSON file containing speech blocks with optimal segmentation
+- **Usage**: `python Subdub.py -i subtitles.srt -task speech_blocks -merge_threshold 1`
 
 ### 6. sync
-- **Description**: Synchronizes existing TTS audio with the original video.
+- **Description**: Synchronizes existing TTS audio with the original video without regenerating audio.
 - **Input**: Video file, speech blocks JSON, and TTS audio files
-- **Output**: Final dubbed video
-- **Usage**: `python Subdub.py -i video.mp4 -task sync -session existing_session`
+- **Output**: Final dubbed video with mixed audio
+- **Usage**: `python Subdub.py -task sync -session existing_session -video original.mp4`
+
+### 7. equalize
+- **Description**: Reformats subtitle text for better readability, adjusting line lengths and breaks.
+- **Input**: SRT subtitle file
+- **Output**: Equalized SRT file with optimal line lengths
+- **Usage**: `python Subdub.py -i subtitles.srt -task equalize -characters 42`
+
+### 8. correct
+- **Description**: Corrects and improves subtitle text without translation (fixing punctuation, capitalization, etc.)
+- **Input**: SRT subtitle file
+- **Output**: Corrected SRT subtitle file in the same language
+- **Usage**: `python Subdub.py -i subtitles.srt -sl English -task correct -correct_prompt "Fix colloquialisms"`
 
 ## Arguments
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `-i`, `--input` | Input video or subtitle file path (required) | - |
+| `-i`, `--input` | Input video, subtitle file, or URL | - |
 | `-sl`, `--source_language` | Source language | English |
 | `-tl`, `--target_language` | Target language for translation | - |
 | `-task` | Task to perform | full |
-| `-session` | Session name or path | - |
-| `-llm-char` | Character limit for translation | 4000 |
-| `-ant_api` | Anthropic API key | - |
-| `-evaluate` | Perform evaluation of translations | False |
-| `-translation_memory` | Enable translation memory/glossary feature | False |
+| `-session` | Session name or path | auto-generated |
+| `-llm-char` | Character limit for translation blocks | 4000 |
+| `-ant_api` | Anthropic API key | env or prompt |
+| `-openai_api` | OpenAI API key | env or prompt |
+| `-gemini_api` | Google Gemini API key | env or prompt |
+| `-api_deepl` | DeepL API key | env or prompt |
+| `-translation_memory` | Enable translation memory/glossary | False |
 | `-tts_voice` | Path to TTS voice WAV file | - |
 | `-whisper_model` | Whisper model for transcription | large-v2 |
-| `-llm-model` | LLM model for translation (sonnet, haiku, gpt-4o and gpt-4o-mini) | sonnet |
+| `-llmapi` | LLM API to use (anthropic, openai, local, deepl, openrouter, gemini) | anthropic |
+| `-llm-model` | LLM model (sonnet, haiku, gpt-4o, gpt-4o-mini, etc.) | sonnet |
 | `-merge_threshold` | Max time (ms) between subtitles to merge | 1 |
+| `-equalize` | Apply SRT equalizer to subtitles | False |
+| `-characters` | Max line length for equalization | 60 |
+| `-correct` | Enable subtitle correction | False |
+| `-correct_prompt` | Additional instructions for correction | - |
+| `-translate_prompt` | Additional instructions for translation | - |
+| `-cot` | Enable chain-of-thought prompting | False |
+| `-context` | Add previous output as context | False |
+| `-thinking` | Enable Claude's extended thinking (Sonnet only) | False |
+| `-thinking_tokens` | Budget tokens for extended thinking | 4000 |
+| `-video` | Input video for sync task | auto-detect |
+| `-max_line_length` | Maximum line length for SRT equalization | 42 |
 
-### Evaluation and Glossary
+### OpenRouter Parameters
 
-- **Evaluate (-evaluate)**: When enabled, this feature performs an additional pass on the translated subtitles. It uses the AI model to review and improve the initial translations, trying to produce better quality and consistency. Only bigger models like Sonnet and GPT-4o can consistently adhere to the instructions. It should be used for output that must be as good as can be achieved with AI translation. Be mindful of the additional cost. Generally, Sonnet performs the best.
+When using `-llmapi openrouter`, these additional parameters are available:
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `-provider` | Providers to prioritize (comma-separated, e.g., 'Anthropic,OpenAI') | - |
+| `-sort` | Provider sorting strategy (price, throughput, latency) | - |
+| `-fallbacks` | Allow fallbacks to other providers | True |
+| `-no-fallbacks` | Disable fallbacks to other providers | - |
+| `-ignore` | Providers to ignore (comma-separated list) | - |
+| `-data-collection` | Data collection policy (allow, deny) | allow |
+| `-require-parameters` | Require providers to support all parameters | False |
+
+### AI Model Selection
+
+Subdub supports multiple AI providers and models:
+
+- **Anthropic Claude**: 
+  - `sonnet` (claude-3-7-sonnet-latest, recommended for quality)
+  - `haiku` (claude-3-5-haiku-latest, faster)
+
+- **OpenAI**: 
+  - `gpt-4o` (highest quality but slower)
+  - `gpt-4o-mini` (faster, good quality)
+
+- **Google Gemini**:
+  - `gemini-flash` (standard)
+  - `gemini-flash-thinking` (with thinking)
+
+- **OpenRouter**:
+  - `deepseek-r1` 
+  - `qwq-32b`
+  - Can add `:nitro` suffix for throughput or `:floor` for lowest cost
+
+- **DeepL**: For pure translation without customization
+
+- **Local**: Uses Text Generation WebUI API
+
+### Glossary
 
 - **Translation Memory/Glossary (-translation_memory)**: This feature maintains a glossary of terms and their translations. It helps ensure consistency across the translation, especially for domain-specific terms or recurring phrases. The glossary is updated throughout the translation process and can be reused in future sessions.
 
