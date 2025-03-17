@@ -21,22 +21,22 @@ import yt_dlp
 from srt_equalizer import srt_equalizer
 import unicodedata
 import deepl
+from google import genai
+from google.generativeai import types
 
 #Ideas
-#Add previous corrected / translated segment to context 
-#Experiment with the validation in chain of thought
 #Add numbering to subtitles
-#Try CSV instead of JSON
-#Implement openrouter
 #Write app to compare / edit subtitles and their translation, including splitting, removing with renumbering, consider including in Pandrator flow?
 #Improve glossary workflow, enable passing a csv file
 #Improve handling of Japanese subtitles (character limit etc.)
+#Improve prompts, make TTS optimisation optional
+#Add option to only consider select conjunctions as valid split points or a minimum gap between words.
 
 # Constants
 MAX_RETRIES = 3
 CHAR_LIMIT_DEFAULT = 2000
 SPEECH_BLOCK_CHAR_LIMIT = 160
-SPEECH_BLOCK_MIN_CHARS = 20
+SPEECH_BLOCK_MIN_CHARS = 10
 SPEECH_BLOCK_MERGE_THRESHOLD = 1  # ms
 
 # Configuration
@@ -46,11 +46,8 @@ Instructions:
 1. You will receive an array of subtitles in JSON format.
 2. Translate each subtitle, maintaining the EXACT SAME array structure.
 3. If a subtitle should be removed (e.g., it contains only filler words or you are confident it is a hallucination of the STT model), replace its text with "[REMOVE]".
-4. Spell out numbers, especially Roman numerals, dates, amounts etc.
-5. Write names, brands, acronyms, abbreviations, and foreign words phonetically in the target language.
-6. Choose concise translations suitable for dubbing while maintaining accuracy, grammatical corectness in the target language and the tone of the source.
-7. Use correct punctuation that enhances a natural fow of speech for optimal speech generation.
-8. Do not add ANY comments, confirmations, explanations, or questions. This is PARTICULARLY IMPORTANT: output only the translation formatted like the original JSON array. Do not change the format. Do not add unneccesary comments or remarks.
+6. Consider relevant best practices of subtitling to make them professional and easy to read, while maintaining accuracy, ensuring correctness of grammar and interpunction in the target language and preserving the tone of the source.
+8. Do not add ANY comments, confirmations, explanations, or questions. 
 10. Before outputting your answer, validate its formatting and consider the source text very carefully. 
 """
 
@@ -113,35 +110,65 @@ Below you will find:
 
 CORRECTION_PROMPT_TEMPLATE = """
 Your Instructions:
-1. You will receive an array of subtitles. Your task is to correct them
-2. Fix punctuation and capitalization such that they are coherent and logical, also between subsequent subtitles 
-3. Correct spelling and obvious transcription errors
-4. Preserve all meaning and content (you should remove filler words, though)
-5. Return the corrected subtitles in the EXACT SAME array structure with the SAME number of items, including subtitles that you didn't change
-6. Do not assume that something needs correcting just because you were asked to consider correcting it, make sure that it really does need correcting
-7. DO NOT split or merge subtitles
+1. You will receive an array of {subtitle_count} numbered subtitles. Each subtitle has a "number" and "text" field.
+2. Fix punctuation and capitalization such that they are coherent and logical, also between subsequent subtitles.
+3. Correct spelling and obvious transcription errors.
+4. Preserve all meaning and content, also stylistic phrases, even if not key to the meaning (you should remove filler words - like "um" - and obvious repetitions - like "it is, it is..." though).
+5. You MUST preserve the "number" field exactly as it is for each subtitle.
+6. You MUST return EXACTLY {subtitle_count} subtitles in the EXACT SAME numbered format.
+7. Only modify the "text" field of each subtitle.
+8. Do not assume that something needs correcting just because you were asked to consider correcting it.
+9. DO NOT split or merge subtitles.
+
+Example input:
+[
+  {{"number": 1, "text": "Hello world."}},
+  {{"number": 2, "text": "how are you today"}}
+]
+
+Example output:
+[
+  {{"number": 1, "text": "Hello world."}},
+  {{"number": 2, "text": "How are you today?"}}
+]
 
 Additional context and instructions specific to your particular batch, if any:
 {correction_instructions}
 
-Remember, validate your output carefully before returning it. Your most important instruction: the number of corrected items in the output array MUST match the number of items received in the input array, it is IMPERATIVE.
+Remember, validate your output carefully before returning it. Your most important instruction: return EXACTLY {subtitle_count} subtitles with the same structure as the input, with each subtitle keeping its original "number" field. If the number of the last output subtitle is not equal to {subtitle_count}, something is wrong with your output.
 """
 
 CORRECTION_PROMPT_TEMPLATE_COT = """
-You will receive an array of subtitles. Your task is to correct them.
+You will receive an array of {subtitle_count} numbered subtitles (sub_numb). Your task is to correct them. You MUST output EXACTLY {subtitle_count} subtitles.
 
-1. Draft your response first inside <draft></draft> tags, then check it inside <analysis></analysis> tags, especially whether the number of output subtitles matches the number of input subtitles, and output the validated response within <final></final> tags. Make sure to close the tags.
-2. Fix punctuation and capitalization such that they are coherent and logical, also between subsequent subtitles 
-3. Correct spelling and obvious transcription errors
-4. Preserve all meaning and content, also stylistic phrases, even if not key to the meaning (you should remove filler words - like "um" - and obvious repetitions - like "it is, it is..." though)
-5. Return the corrected subtitles in the EXACT SAME array structure with the SAME number of items, including subtitles that you didn't change 
-6. Do not assume that something needs correcting just because you were asked to consider correcting it, make sure that it really does need correcting
-7. DO NOT split or merge subtitles
+1. Fix punctuation and capitalization such that they are coherent and logical, also between subsequent subtitles.
+2. Correct spelling and obvious transcription errors.
+3. Preserve all meaning and content, also stylistic phrases, even if not key to the meaning (you should remove filler words - like "um" - and obvious repetitions - like "it is, it is..." though).
+4. Each subtitle has a "number" and "text" field. You MUST preserve the "number" field exactly as it is.
+5. You MUST return subtitles in the EXACT SAME numbered format with the SAME number of items ({subtitle_count} items).
+6. Do not assume that something needs correcting just because you were asked to consider correcting it.
+7. DO NOT split or merge subtitles.
+
+Draft your response first inside <draft></draft> tags.
+Check your draft inside <analysis></analysis> tags, especially whether the number of output subtitles matches the number of input subtitles ({subtitle_count}) and identify problems or possible improvement. If the id of the last output subtitle is not equal to {subtitle_count}, try again.
+Implement other improvements you identified and output the final response within <final></final> tags.
+
+Example input:
+[
+  {{"number": 1, "text": "Hello world."}},
+  {{"number": 2, "text": "how are you today"}}
+]
+
+Example output:
+[
+  {{"number": 1, "text": "Hello world."}},
+  {{"number": 2, "text": "How are you today?"}}
+]
 
 Additional context and instructions specific to your particular batch, if any:
 {correction_instructions}
 
-Remember, validate your output carefully before returning it. Your most important instruction: the number of corrected items in the output array MUST match the number of items received in the input array, it is IMPERATIVE.
+Remember, validate your output carefully before returning it. Your most important instruction: return EXACTLY {subtitle_count} subtitles with the same structure as the input, with each subtitle keeping its original "number" field.
 """
 
 CORRECTION_PROMPT_TEMPLATE3 = """
@@ -185,6 +212,37 @@ CUSTOM_SYSTEM_PROMPT = "You are an experienced translator and text editor profic
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+def renumber_subtitles(srt_content: str) -> str:
+    """
+    Renumbers subtitles in an SRT file to ensure they are consecutive.
+    
+    Args:
+        srt_content: The content of the SRT file as a string
+        
+    Returns:
+        A string containing the SRT content with consecutive subtitle numbers
+    """
+    try:
+        # Parse the SRT content
+        subtitles = list(srt.parse(srt_content))
+        
+        # Create a new list of subtitles with consecutive indices
+        renumbered_subtitles = []
+        for i, subtitle in enumerate(subtitles, 1):
+            renumbered_subtitles.append(srt.Subtitle(
+                index=i,
+                start=subtitle.start,
+                end=subtitle.end,
+                content=subtitle.content
+            ))
+        
+        # Recompose the SRT content
+        return srt.compose(renumbered_subtitles)
+    except Exception as e:
+        logging.error(f"Error while renumbering subtitles: {str(e)}")
+        # Return the original content if renumbering fails
+        return srt_content
+
 def download_from_url(url: str, session_folder: str) -> Tuple[str, str]:
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',  # Prefer MP4, but fall back to best available format
@@ -216,22 +274,10 @@ def equalize_srt(input_srt: str, output_srt: str, max_line_length: int) -> None:
 
 def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, str]], 
                    system_prompt: str = "", provider_params: Dict = None,
-                   use_thinking: bool = False, thinking_tokens: int = 8000) -> str:
+                   use_thinking: bool = False, thinking_tokens: int = 8000,
+                   gemini_api_key: str = None) -> str:
     """
     Send a request to a language model API and process the response.
-    
-    Args:
-        client: The API client instance
-        llm_api: Which API to use ('anthropic', 'openai', etc.)
-        model: The specific model to use
-        messages: List of message dictionaries to send
-        system_prompt: Optional system prompt for the model
-        provider_params: Optional parameters for OpenRouter API
-        use_thinking: Whether to enable Claude's extended thinking
-        thinking_tokens: Budget for Claude's thinking process
-        
-    Returns:
-        Processed response text
     """
     try:
         # Print a divider for better readability
@@ -281,7 +327,7 @@ def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, s
             print("RECEIVED ANTHROPIC API RESPONSE")
             print("-" * 80)
             
-            # First, extract all thinking blocks and log them
+            # Extract all thinking blocks and log them
             thinking_content = []
             text_content = []
             
@@ -324,7 +370,6 @@ def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, s
             response = client.chat.completions.create(
                 model=model,
                 messages=openai_messages,
-                temperature=0.7,
                 max_tokens=8000
             )
             
@@ -348,7 +393,6 @@ def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, s
             request_body = {
                 "model": model,
                 "messages": messages,
-                "temperature": 0.7,
                 "max_tokens": 32000
             }
             
@@ -373,6 +417,44 @@ def llm_api_request(client, llm_api: str, model: str, messages: List[Dict[str, s
             print("\nOPENROUTER API RESPONSE:")
             print("-" * 80)
             print(content)
+            
+        elif llm_api == "gemini":
+            try:
+                from google import genai
+                
+                # Create a basic client with API key
+                gemini_client = genai.Client(api_key=gemini_api_key)
+                
+                print("\nSending request to Gemini API...")
+                
+                # Get content from the last message
+                user_content = messages[-1]["content"]
+                
+                # Handle system prompt separately if provided
+                if system_prompt:
+                    # Simply prepend system instruction to the user content
+                    formatted_prompt = f"System instruction: {system_prompt}\n\nUser request: {user_content}"
+                    response = gemini_client.models.generate_content(
+                        model=model,
+                        contents=formatted_prompt
+                    )
+                else:
+                    # Basic request without system prompt
+                    response = gemini_client.models.generate_content(
+                        model=model,
+                        contents=user_content
+                    )
+                
+                # Extract text from the response
+                content = response.text
+                
+                print("\nGEMINI API RESPONSE:")
+                print("-" * 80)
+                print(content)
+            except Exception as e:
+                error_msg = f"Gemini API error: {str(e)}"
+                logging.error(error_msg)
+                raise Exception(error_msg)
             
         elif llm_api == "local":
             url = "http://127.0.0.1:5000/v1/chat/completions"
@@ -586,7 +668,7 @@ def translate_blocks(translation_blocks: List[List[Dict]], source_lang: str, tar
                     translation_prompt: str, translation_instructions: str, glossary_prompt: str, 
                     system_prompt: str, use_cot: bool = False, use_context: bool = False,
                     provider_params: Dict = None, use_thinking: bool = False, 
-                    thinking_tokens: int = 8000) -> Tuple[List[Dict[str, Union[str, List[str]]]], Dict[str, str]]:
+                    thinking_tokens: int = 8000, gemini_api_key: str = None) -> Tuple[List[Dict[str, Union[str, List[str]]]], Dict[str, str]]:
     
     translated_responses = []
     new_glossary = {}
@@ -602,6 +684,8 @@ def translate_blocks(translation_blocks: List[List[Dict]], source_lang: str, tar
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ.get('OPENROUTER_API')
         )
+    elif llm_api == "gemini":
+        client = genai.Client(api_key=gemini_api_key)
     
     # Build the base prompt
     base_prompt = (TRANSLATION_PROMPT_TEMPLATE_COT if use_cot else TRANSLATION_PROMPT_TEMPLATE).format(
@@ -812,7 +896,8 @@ def evaluate_translation(
     system_prompt: str,
     provider_params: Dict = None,
     use_thinking: bool = False,
-    thinking_tokens: int = 8000
+    thinking_tokens: int = 8000,
+    gemini_api_key: str = None
 ) -> Tuple[List[Dict[str, Union[str, List[str]]]], Dict[str, str]]:
     """
     Evaluates translations using the specified LLM API.
@@ -860,6 +945,8 @@ def evaluate_translation(
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ.get('OPENROUTER_API')
         )
+    elif llm_api == "gemini":
+        client = genai.Client(api_key=gemini_api_key)
 
     for i, (block, full_response) in enumerate(zip(translation_blocks, full_responses)):
         original_subtitles = json.dumps([sub['text'] for sub in block])
@@ -1407,50 +1494,57 @@ def correct_subtitles(
     translation_blocks: List[List[Dict]],
     source_lang: str,
     correction_instructions: str,
-    anthropic_api_key: str,
-    openai_api_key: str,
-    llm_api: str,
-    model: str,
-    correction_prompt: str,
-    system_prompt: str,
+    anthropic_api_key: str = None,
+    openai_api_key: str = None,
+    llm_api: str = "anthropic",
+    model: str = None,
+    correction_prompt: str = CORRECTION_PROMPT_TEMPLATE,
+    system_prompt: str = CUSTOM_SYSTEM_PROMPT,
     use_cot: bool = False,
     use_context: bool = False,
     provider_params: Dict = None,
     use_thinking: bool = False,
-    thinking_tokens: int = 8000
+    thinking_tokens: int = 8000,
+    gemini_api_key: str = None
 ) -> List[Dict[str, Union[str, List[str]]]]:
     """
     Corrects subtitles using the specified LLM API.
-    
-    Args:
-        translation_blocks: List of blocks of subtitles to correct
-        source_lang: Source language
-        correction_instructions: Additional correction instructions
-        anthropic_api_key: Anthropic API key
-        openai_api_key: OpenAI API key
-        llm_api: LLM API to use
-        model: Model name to use
-        correction_prompt: Correction prompt template
-        system_prompt: System prompt
-        use_cot: Whether to use chain of thought prompting
-        use_context: Whether to provide context from previous responses
-        provider_params: Optional dictionary of OpenRouter provider parameters
-        
-    Returns:
-        List of corrected responses
     """
     corrected_responses = []
     previous_response = None
     
-    base_prompt = (CORRECTION_PROMPT_TEMPLATE_COT if use_cot else CORRECTION_PROMPT_TEMPLATE).format(
-        source_lang=source_lang,
-        correction_instructions=correction_instructions if correction_instructions else "No additional instructions provided."
-    )
+    # Select the appropriate template but don't format it yet
+    prompt_template = CORRECTION_PROMPT_TEMPLATE_COT if use_cot else CORRECTION_PROMPT_TEMPLATE
 
-    client = Anthropic(api_key=anthropic_api_key) if llm_api == "anthropic" else OpenAI(api_key=openai_api_key) if llm_api == "openai" else None
+    # Initialize appropriate client based on LLM API
+    client = None
+    if llm_api == "anthropic":
+        client = Anthropic(api_key=anthropic_api_key)
+    elif llm_api == "openai":
+        client = OpenAI(api_key=openai_api_key)
+    elif llm_api == "openrouter":
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ.get('OPENROUTER_API')
+        )
+    elif llm_api == "gemini":
+        # For Gemini, we'll pass the API key to llm_api_request
+        pass
+    elif llm_api == "local":
+        # Local API doesn't need a client initialization
+        pass
+    elif llm_api == "deepl":
+        # DeepL is not applicable for correction
+        raise ValueError("DeepL API is not supported for subtitle correction")
 
     for i, block in enumerate(translation_blocks):
-        subtitles = json.dumps([sub['text'] for sub in block])
+        # Now format the prompt for this specific block
+        base_prompt = prompt_template.format(
+            correction_instructions=correction_instructions if correction_instructions else "No additional instructions provided.",
+            subtitle_count=len(block)  # Now block is defined
+        )
+        
+        subtitles = json.dumps([{"number": idx+1, "text": sub['text']} for idx, sub in enumerate(block)], ensure_ascii=False)
         
         if use_context and previous_response:
             context_prompt = CONTEXT_PROMPT_TEMPLATE.format(
@@ -1460,30 +1554,66 @@ def correct_subtitles(
         else:
             final_prompt = f"{base_prompt}\n\nThe subtitles:\n{subtitles}"
 
+        logging.info(f"Correcting block {i+1}/{len(translation_blocks)}")
+        
         for attempt in range(MAX_RETRIES):
             try:
                 messages = [{"role": "user", "content": final_prompt}]
-                content = llm_api_request(client, llm_api, model, messages, system_prompt, 
-                         provider_params=provider_params, use_thinking=use_thinking, 
-                         thinking_tokens=thinking_tokens)
+                content = llm_api_request(
+                    client=client, 
+                    llm_api=llm_api, 
+                    model=model, 
+                    messages=messages, 
+                    system_prompt=system_prompt, 
+                    provider_params=provider_params, 
+                    use_thinking=use_thinking, 
+                    thinking_tokens=thinking_tokens,
+                    gemini_api_key=gemini_api_key
+                )
                 previous_response = content
                 
                 try:
+                    # Clean up the response - find JSON array if embedded in other text
+                    start_idx = content.find('[')
+                    end_idx = content.rfind(']')
+                    if start_idx != -1 and end_idx != -1:
+                        content = content[start_idx:end_idx+1]
+                    
                     corrected_subtitles = json.loads(content)
                     if len(corrected_subtitles) != len(block):
-                        raise ValueError("Mismatch in subtitle count")
+                        logging.warning(f"Block {i+1}: Mismatch in subtitle count. Expected {len(block)}, got {len(corrected_subtitles)}")
+                        if attempt < MAX_RETRIES - 1:
+                            logging.info(f"Retrying block {i+1} (attempt {attempt+2}/{MAX_RETRIES})")
+                            continue
+                        raise ValueError(f"Mismatch in subtitle count for block {i+1}")
+                    
+                    # Check structure of each subtitle
+                    try:
+                        for j, sub in enumerate(corrected_subtitles):
+                            if not isinstance(sub, dict) or "number" not in sub or "text" not in sub:
+                                logging.warning(f"Block {i+1}: Invalid subtitle format at position {j}")
+                                if attempt < MAX_RETRIES - 1:
+                                    logging.info(f"Retrying block {i+1} (attempt {attempt+2}/{MAX_RETRIES})")
+                                    raise ValueError("Invalid subtitle format")
+                                else:
+                                    raise ValueError(f"Invalid subtitle format in block {i+1}")
+                    except ValueError:
+                        continue
                     
                     corrected_responses.append({
-                        "translation": corrected_subtitles,
+                        "translation": [sub["text"] for sub in corrected_subtitles],  # Extract just the text
                         "original_indices": [sub['index'] for sub in block]
                     })
+                    logging.info(f"Successfully corrected block {i+1}")
                     break
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logging.error(f"JSON decode error in block {i+1}, attempt {attempt+1}: {str(e)}")
                     if attempt == MAX_RETRIES - 1:
-                        raise ValueError(f"Failed to parse JSON response for block {i+1}")
+                        raise ValueError(f"Failed to parse JSON response for block {i+1} after {MAX_RETRIES} attempts")
             except Exception as e:
+                logging.error(f"Error in correction attempt {attempt+1} for block {i+1}: {str(e)}")
                 if attempt == MAX_RETRIES - 1:
-                    raise
+                    raise ValueError(f"Failed to correct block {i+1} after {MAX_RETRIES} attempts: {str(e)}")
 
     return corrected_responses
 
@@ -1568,8 +1698,12 @@ def main():
     parser.add_argument('-tts_voice', help="Path to TTS voice WAV file")
     parser.add_argument('-whisper_model', choices=['base', 'small', 'small.en', 'medium', 'medium.en', 'large-v2', 'large-v3'], default='large-v2', help="Whisper model to use for transcription (default: large-v2)")
     parser.add_argument('-openai_api', help="OpenAI API key")
-    parser.add_argument('-llmapi', choices=['anthropic', 'openai', 'local', 'deepl', 'openrouter'], default='anthropic', help="LLM API to use (default: anthropic)")
-    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4o', 'gpt-4o-mini', 'deepseek-r1', 'qwq-32b', 'deepseek-v3'], help="LLM model to use")
+    parser.add_argument('-llmapi', choices=['anthropic', 'openai', 'local', 'deepl', 'openrouter', 'gemini'], 
+                        default='anthropic', help="LLM API to use (default: anthropic)")
+    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4o', 'gpt-4o-mini', 
+                    'deepseek-r1', 'qwq-32b', 'deepseek-v3', 'gemini-flash', 'gemini-flash-thinking'], 
+                    help="LLM model to use")
+    parser.add_argument('-gemini_api', help="Google Gemini API key")
     parser.add_argument('-session', help="Session name or path. If not provided, a new session folder will be created.")
     parser.add_argument('-merge_threshold', type=int, default=SPEECH_BLOCK_MERGE_THRESHOLD, help=f"Maximum time difference (in ms) between subtitles to be merged (default: {SPEECH_BLOCK_MERGE_THRESHOLD})")
     parser.add_argument('-task', choices=['tts', 'full', 'transcribe', 'translate', 'speech_blocks', 'sync', 'equalize', 'correct'], default='full', help="Task to perform (default: full)")    
@@ -1610,10 +1744,16 @@ def main():
 
     if args.llm_model in ['gpt-4o', 'gpt-4o-mini']:
         args.llmapi = 'openai'
+    elif args.llm_model in ['gemini-flash', 'gemini-flash-thinking']:
+        args.llmapi = 'gemini'
 
     openai_model_mapping = {
         'gpt-4o': 'chatgpt-4o-latest',
         'gpt-4o-mini': 'gpt-4o-mini'
+    }
+    gemini_model_mapping = {
+        'gemini-flash': 'gemini-2.0-flash',
+        'gemini-flash-thinking': 'gemini-2.0-flash-thinking-exp'
     }
 
     if args.llmapi == 'anthropic':
@@ -1628,7 +1768,10 @@ def main():
         if not args.llm_model or args.llm_model not in ['deepseek-r1', 'qwq-32b']:
             args.llm_model = 'deepseek-r1'
         model = f"deepseek/{args.llm_model}" if args.llm_model == 'deepseek-r1' else f"qwen/{args.llm_model}"
-        
+    elif args.llmapi == 'gemini':
+        if not args.llm_model or args.llm_model not in ['gemini-flash', 'gemini-flash-thinking']:
+            args.llm_model = 'gemini-flash'
+        model = gemini_model_mapping[args.llm_model]
         # Handle model name shortcuts for OpenRouter
         if args.sort == 'throughput' and ':nitro' not in model:
             model += ':nitro'
@@ -1722,6 +1865,8 @@ def main():
                 args.ant_api = args.ant_api or os.environ.get('ANTHROPIC_API_KEY') or input("Please enter your Anthropic API key: ")
             elif args.llmapi == 'openai':
                 args.openai_api = args.openai_api or os.environ.get('OPENAI_API_KEY') or input("Please enter your OpenAI API key: ")
+            elif args.llmapi == 'gemini':
+                args.gemini_api = args.gemini_api or os.environ.get('GEMINI_API_KEY') or input("Please enter your Google Gemini API key: ")
             elif args.llmapi == 'openrouter':
                 if not os.environ.get('OPENROUTER_API'):
                     raise ValueError("OPENROUTER_API environment variable must be set")
@@ -1742,12 +1887,29 @@ def main():
             logging.info(f"Transcription completed: {srt_path}")
             with open(srt_path, 'r', encoding='utf-8') as f:
                 srt_content = f.read()
+            
+            # Renumber subtitles to ensure consecutive numbering
+            original_srt_content = srt_content
+            srt_content = renumber_subtitles(srt_content)
+            if srt_content != original_srt_content:
+                renumbered_srt_path = os.path.join(session_folder, f"{video_name}_renumbered.srt")
+                with open(renumbered_srt_path, 'w', encoding='utf-8') as f:
+                    f.write(srt_content)
+                logging.info(f"Non-consecutive subtitle numbers detected. Renumbered subtitles saved: {renumbered_srt_path}")
+            
         elif video_path.lower().endswith('.srt'):
             with open(video_path, 'r', encoding='utf-8') as f:
                 srt_content = f.read()
             logging.info(f"Using input subtitles: {video_path}")
-        else:
-            raise ValueError("Unsupported input file format. Please provide a video file or an SRT file.")
+            
+            # Renumber subtitles to ensure consecutive numbering
+            original_srt_content = srt_content
+            srt_content = renumber_subtitles(srt_content)
+            if srt_content != original_srt_content:
+                renumbered_srt_path = os.path.join(session_folder, f"{video_name}_renumbered.srt")
+                with open(renumbered_srt_path, 'w', encoding='utf-8') as f:
+                    f.write(srt_content)
+                logging.info(f"Non-consecutive subtitle numbers detected. Renumbered subtitles saved: {renumbered_srt_path}")
 
         # Handle the correct task
         if args.task == 'correct':
@@ -1802,7 +1964,8 @@ def main():
                 system_prompt,
                 use_cot=args.cot,
                 use_context=args.context,
-                provider_params=provider_params
+                provider_params=provider_params,
+                gemini_api_key=args.gemini_api
             )
             logging.info("Correction completed")
 
@@ -1856,7 +2019,8 @@ def main():
                     use_context=args.context,
                     provider_params=provider_params,
                     use_thinking=args.thinking,
-                    thinking_tokens=args.thinking_tokens
+                    thinking_tokens=args.thinking_tokens,
+                    gemini_api_key=args.gemini_api
                 )
                 logging.info("Translation completed")
 
@@ -1881,7 +2045,8 @@ def main():
                         system_prompt,
                         provider_params=provider_params,
                         use_thinking=args.thinking,
-                        thinking_tokens=args.thinking_tokens
+                        thinking_tokens=args.thinking_tokens,
+                        gemini_api_key=args.gemini_api
                     )
                     logging.info("Evaluation completed")
                     evaluation_suffix = "_eval"
