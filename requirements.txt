@@ -7,3 +7,4 @@ yt_dlp==2025.1.26
 srt_equalizer==0.1.10
 deepl==1.21.0
 google-genai
+google.generativeai
