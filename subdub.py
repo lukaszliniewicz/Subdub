@@ -46,8 +46,11 @@ Instructions:
 1. You will receive an array of subtitles in JSON format.
 2. Translate each subtitle, maintaining the EXACT SAME array structure.
 3. If a subtitle should be removed (e.g., it contains only filler words or you are confident it is a hallucination of the STT model), replace its text with "[REMOVE]".
-6. Consider relevant best practices of subtitling to make them professional and easy to read, while maintaining accuracy, ensuring correctness of grammar and interpunction in the target language and preserving the tone of the source.
-8. Do not add ANY comments, confirmations, explanations, or questions. 
+4. Spell out numbers, especially Roman numerals, dates, amounts etc.
+5. Write names, brands, acronyms, abbreviations, and foreign words phonetically in the target language.
+6. Choose concise translations suitable for dubbing while maintaining accuracy, grammatical corectness in the target language and the tone of the source.
+7. Use correct punctuation that enhances a natural fow of speech for optimal speech generation.
+8. Do not add ANY comments, confirmations, explanations, or questions. This is PARTICULARLY IMPORTANT: output only the translation formatted like the original JSON array. Do not change the format. Do not add unneccesary comments or remarks.
 10. Before outputting your answer, validate its formatting and consider the source text very carefully. 
 """
 
@@ -1700,8 +1703,8 @@ def main():
     parser.add_argument('-openai_api', help="OpenAI API key")
     parser.add_argument('-llmapi', choices=['anthropic', 'openai', 'local', 'deepl', 'openrouter', 'gemini'], 
                         default='anthropic', help="LLM API to use (default: anthropic)")
-    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4o', 'gpt-4o-mini', 
-                    'deepseek-r1', 'qwq-32b', 'deepseek-v3', 'gemini-flash', 'gemini-flash-thinking'], 
+    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4.1', 'gpt-4.1-mini', 
+                    'deepseek-r1', 'qwq-32b', 'deepseek-v3', 'gemini-pro', 'gemini-flash'], 
                     help="LLM model to use")
     parser.add_argument('-gemini_api', help="Google Gemini API key")
     parser.add_argument('-session', help="Session name or path. If not provided, a new session folder will be created.")
@@ -1742,18 +1745,18 @@ def main():
     if args.task != 'sync' and not args.input:
         parser.error("the following arguments are required: -i/--input")
 
-    if args.llm_model in ['gpt-4o', 'gpt-4o-mini']:
+    if args.llm_model in ['gpt-4.1', 'gpt-4.1-mini']:
         args.llmapi = 'openai'
-    elif args.llm_model in ['gemini-flash', 'gemini-flash-thinking']:
+    elif args.llm_model in ['gemini-pro', 'gemini-flash']:
         args.llmapi = 'gemini'
 
     openai_model_mapping = {
-        'gpt-4o': 'chatgpt-4o-latest',
-        'gpt-4o-mini': 'gpt-4o-mini'
+        'gpt-4.1': 'gpt-4.1',
+        'gpt-4.1-mini': 'gpt-4.1-mini'
     }
     gemini_model_mapping = {
-        'gemini-flash': 'gemini-2.0-flash',
-        'gemini-flash-thinking': 'gemini-2.0-flash-thinking-exp'
+        'gemini-flash': 'gemini-2.5-flash-preview-04-17',
+        'gemini-pro': 'gemini-2.5-pro-exp-03-25'
     }
 
     if args.llmapi == 'anthropic':
@@ -1761,15 +1764,15 @@ def main():
             args.llm_model = 'sonnet'
         model = "claude-3-5-haiku-latest" if args.llm_model == 'haiku' else "claude-3-7-sonnet-latest"
     elif args.llmapi == 'openai':
-        if not args.llm_model or args.llm_model not in ['gpt-4o', 'gpt-4o-mini']:
-            args.llm_model = 'gpt-4o-mini'
+        if not args.llm_model or args.llm_model not in ['gpt-4.1', 'gpt-4.1-mini']:
+            args.llm_model = 'gpt-4.1-mini'
         model = openai_model_mapping[args.llm_model]
     elif args.llmapi == 'openrouter':
         if not args.llm_model or args.llm_model not in ['deepseek-r1', 'qwq-32b']:
             args.llm_model = 'deepseek-r1'
         model = f"deepseek/{args.llm_model}" if args.llm_model == 'deepseek-r1' else f"qwen/{args.llm_model}"
     elif args.llmapi == 'gemini':
-        if not args.llm_model or args.llm_model not in ['gemini-flash', 'gemini-flash-thinking']:
+        if not args.llm_model or args.llm_model not in ['gemini-pro', 'gemini-flash']:
             args.llm_model = 'gemini-flash'
         model = gemini_model_mapping[args.llm_model]
         # Handle model name shortcuts for OpenRouter
