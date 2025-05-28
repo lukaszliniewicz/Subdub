@@ -38,6 +38,8 @@ CHAR_LIMIT_DEFAULT = 2000
 SPEECH_BLOCK_CHAR_LIMIT = 160
 SPEECH_BLOCK_MIN_CHARS = 10
 SPEECH_BLOCK_MERGE_THRESHOLD = 1  # ms
+DEFAULT_WHISPER_PROMPT = "Hello, welcome to this presentation. This is a professional recording with clear speech, proper punctuation, and standard grammar."
+
 
 # Configuration
 TRANSLATION_PROMPT_TEMPLATE = """Your task: translate machine-generated subtitles from {source_lang} to {target_lang}. 
@@ -554,10 +556,12 @@ def extract_audio(video_path: str, session_folder: str, video_name: str) -> str:
     command = [
         'ffmpeg',
         '-i', video_path,
-        '-vn',
-        '-acodec', 'pcm_s16le',
-        '-ar', '44100',
-        '-ac', '2',
+        '-vn',  # No video
+        '-acodec', 'pcm_s16le',  # 16-bit PCM
+        '-ar', '16000',  # 16kHz (Whisper's training rate)
+        '-ac', '1',  # Mono
+        '-af', 'aresample=resampler=soxr:precision=28:cheby=1,loudnorm',  # High-quality resampling + normalization
+        '-y',  # Overwrite output files
         audio_path
     ]
     try:
@@ -569,7 +573,7 @@ def extract_audio(video_path: str, session_folder: str, video_name: str) -> str:
         raise
     return audio_path
 
-def transcribe_audio(audio_path: str, language: str, session_folder: str, video_name: str, whisper_model: str) -> str:
+def transcribe_audio(audio_path: str, language: str, session_folder: str, video_name: str, whisper_model: str, align_model: str = None, initial_prompt: str = None) -> str:
     output_srt = os.path.join(session_folder, f"{video_name}.srt")
     base_whisperx_args = [
         audio_path,
@@ -577,13 +581,27 @@ def transcribe_audio(audio_path: str, language: str, session_folder: str, video_
         '--language', language,
         '--output_format', 'srt',
         '--output_dir', session_folder,
-        '--print_progress', 'True'
+        '--print_progress', 'True' 
     ]
+
+    # Add initial_prompt if provided
+    if initial_prompt:
+        base_whisperx_args.extend(['--initial_prompt', initial_prompt])
+        logging.info(f"WhisperX will use initial prompt: {initial_prompt}")
+
+    # Add align_model argument if provided
+    if align_model:
+        base_whisperx_args.extend(['--align_model', align_model])
+        logging.info(f"WhisperX will use alignment model: {align_model}")
+    else:
+        logging.info("WhisperX will use its default alignment model for the specified language (if any).")
+
+
 
     # First attempt with direct whisperx command
     try:
         whisperx_command = ['whisperx'] + base_whisperx_args
-        logging.info("Attempting direct whisperx command...")
+        logging.info(f"Attempting direct whisperx command: {' '.join(whisperx_command)}")
         result = subprocess.run(whisperx_command, check=True, capture_output=True)
         if result.stderr:
             logging.warning(f"WhisperX warning: {safe_decode(result.stderr)}")
@@ -593,18 +611,33 @@ def transcribe_audio(audio_path: str, language: str, session_folder: str, video_
             conda_whisperx_command = [
                 "../conda/Scripts/conda.exe", "run", "-p", "../conda/envs/whisperx_installer", "--no-capture-output",
                 "python", "-m", "whisperx"
-            ] + base_whisperx_args
-            logging.info("Attempting conda run whisperx command...")
+            ] + base_whisperx_args # base_whisperx_args now includes align_model if set
+            logging.info(f"Attempting conda run whisperx command: {' '.join(conda_whisperx_command)}")
             result = subprocess.run(conda_whisperx_command, check=True, capture_output=True)
             if result.stderr:
                 logging.warning(f"WhisperX warning: {safe_decode(result.stderr)}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"WhisperX command failed using both methods. Error output:\n{safe_decode(e.stderr)}")
-            raise
+        except subprocess.CalledProcessError as e_conda:
+            logging.error(f"WhisperX command failed using both methods.")
+            if isinstance(e, subprocess.CalledProcessError):
+                 logging.error(f"Direct WhisperX Error output:\n{safe_decode(e.stderr)}")
+            logging.error(f"Conda WhisperX Error output:\n{safe_decode(e_conda.stderr)}")
+            raise e_conda
     
-    whisperx_output = os.path.join(session_folder, f"{os.path.splitext(os.path.basename(audio_path))[0]}.srt")
-    os.rename(whisperx_output, output_srt)
+    whisperx_output_filename_base = os.path.splitext(os.path.basename(audio_path))[0]
+    whisperx_generated_srt_path = os.path.join(session_folder, f"{whisperx_output_filename_base}.srt")
     
+    if os.path.exists(whisperx_generated_srt_path):
+        os.rename(whisperx_generated_srt_path, output_srt)
+    else:
+        # Fallback to find any .srt file generated for this audio in the session_folder
+        potential_files = [f for f in os.listdir(session_folder) if f.startswith(whisperx_output_filename_base) and f.endswith(".srt")]
+        if potential_files:
+            actual_whisperx_output = os.path.join(session_folder, potential_files[0])
+            logging.warning(f"Expected WhisperX SRT file not found at {whisperx_generated_srt_path}. Found and using: {actual_whisperx_output}")
+            os.rename(actual_whisperx_output, output_srt)
+        else:
+            raise FileNotFoundError(f"WhisperX did not produce the expected SRT file. Looked for {whisperx_generated_srt_path} and similar pattern.")
+            
     return output_srt
 
 def create_translation_blocks(srt_content: str, char_limit: int, source_language: str) -> List[List[Dict]]:
@@ -1026,137 +1059,370 @@ def save_glossary(session_folder: str, glossary: Dict[str, str]) -> None:
     with open(glossary_path, 'w', encoding='utf-8') as f:
         json.dump(glossary, f, ensure_ascii=False, indent=2)
 
+XTTS_TO_SENTENCE_SPLITTER_LANG = {
+    "en": "en", "es": "es", "fr": "fr", "de": "de", "it": "it", "pt": "pt", "pl": "pl",
+    "tr": "tr", "ru": "ru", "nl": "nl", "cs": "cs", "hu": "hu", "ca": "ca",
+    "da": "da", "fi": "fi", "el": "el", "is": "is", "lv": "lv", "lt": "lt",
+    "no": "no", "ro": "ro", "sk": "sk", "sl": "sl", "sv": "sv",
+    # Languages like zh-cn, ja, ko, ar are not in sentence_splitter's list, so they will correctly result in None
+}
+
+
+def _check_split_validity(text_to_split: str, split_index: int, max_len: int, min_len_part: int) -> bool:
+    if split_index <= 0 or split_index >= len(text_to_split):
+        return False
+    
+    part1 = text_to_split[:split_index].strip()
+    part2 = text_to_split[split_index:].strip()
+
+    if not part1 or not part2:
+        return False
+    
+    return min_len_part <= len(part1) <= max_len and len(part2) >= min_len_part
+
+def _split_further(text: str, xtts_lang_code: str, max_chars: int, min_chars: int, conjunctions_map: Dict) -> List[str]:
+    text = text.strip()
+    if not text: return []
+    if len(text) <= max_chars:
+        return [text]
+
+    results: List[str] = []
+    midpoint = len(text) // 2
+
+    punct_sets = ['.!?', ',;:']
+    best_punct_split_point = -1
+
+    for p_set_str in punct_sets:
+        min_dist_to_mid_punct = float('inf')
+        current_best_for_set = -1
+        for i in range(len(text) - 1, min_chars - 1, -1):
+            char = text[i]
+            if char in p_set_str:
+                if _check_split_validity(text, i + 1, max_chars, min_chars):
+                    dist = abs((i + 1) - midpoint)
+                    if dist < min_dist_to_mid_punct:
+                        min_dist_to_mid_punct = dist
+                        current_best_for_set = i + 1
+                    elif dist == min_dist_to_mid_punct and (i + 1) > current_best_for_set:
+                        current_best_for_set = i + 1
+        if current_best_for_set != -1:
+            best_punct_split_point = current_best_for_set
+            break
+    
+    if best_punct_split_point != -1:
+        part1 = text[:best_punct_split_point].strip()
+        part2 = text[best_punct_split_point:].strip()
+        if part1: results.append(part1)
+        if part2: results.extend(_split_further(part2, xtts_lang_code, max_chars, min_chars, conjunctions_map))
+        return [r for r in results if r]
+
+    lang_conjunctions = conjunctions_map.get(xtts_lang_code, [])
+    best_conj_split_point = -1
+    min_dist_to_mid_conj = float('inf')
+
+    if lang_conjunctions:
+        for conj in lang_conjunctions:
+            for m in re.finditer(r'\b' + re.escape(conj) + r'\b', text, re.IGNORECASE):
+                split_at_index = m.start()
+                if split_at_index == 0: continue
+                if _check_split_validity(text, split_at_index, max_chars, min_chars):
+                    dist = abs(split_at_index - midpoint)
+                    if dist < min_dist_to_mid_conj:
+                        min_dist_to_mid_conj = dist
+                        best_conj_split_point = split_at_index
+                    elif dist == min_dist_to_mid_conj and split_at_index > best_conj_split_point:
+                        best_conj_split_point = split_at_index
+    
+    if best_conj_split_point != -1:
+        part1 = text[:best_conj_split_point].strip()
+        part2 = text[best_conj_split_point:].strip()
+        if part1: results.append(part1)
+        if part2: results.extend(_split_further(part2, xtts_lang_code, max_chars, min_chars, conjunctions_map))
+        return [r for r in results if r]
+
+    best_word_split_point = -1
+    min_dist_to_mid_word = float('inf')
+
+    for i in range(len(text) - 1, 0, -1):
+        if text[i].isspace():
+            if _check_split_validity(text, i, max_chars, min_chars):
+                dist = abs(i - midpoint)
+                if dist < min_dist_to_mid_word:
+                    min_dist_to_mid_word = dist
+                    best_word_split_point = i
+                elif dist == min_dist_to_mid_word and i > best_word_split_point:
+                     best_word_split_point = i
+    
+    if best_word_split_point != -1:
+        part1 = text[:best_word_split_point].strip()
+        part2 = text[best_word_split_point+1:].strip()
+        if part1: results.append(part1)
+        if part2: results.extend(_split_further(part2, xtts_lang_code, max_chars, min_chars, conjunctions_map))
+        return [r for r in results if r]
+
+    cut_at = max_chars
+    part1_final = text[:cut_at].strip()
+    part2_final = text[cut_at:].strip()
+    
+    temp_cut_text = text[:max_chars]
+    last_space = temp_cut_text.rfind(' ')
+
+    if last_space != -1:
+        temp_part1 = temp_cut_text[:last_space].strip()
+        temp_part2 = text[last_space+1:].strip()
+        if len(temp_part1) >= min_chars and (len(temp_part2) >= min_chars or not temp_part2):
+            part1_final = temp_part1
+            part2_final = temp_part2
+            
+    if part1_final: results.append(part1_final)
+    if part2_final: results.extend(_split_further(part2_final, xtts_lang_code, max_chars, min_chars, conjunctions_map))
+    return [r for r in results if r]
+
+
+def _fallback_original_find_split_point(text: str, max_length: int, min_length: int, language_code: str, conjunctions_map: Dict) -> int:
+    mid = len(text) // 2
+    best_split_len = -1
+
+    punct_sets_with_priority = [('.!?', 1), (',;:', 2)]
+
+    for p_chars, priority in punct_sets_with_priority:
+        current_best_len_for_set = -1
+        min_dist_for_set = float('inf')
+        for i in range(min_length -1, min(len(text) - min_length, max_length)):
+            if text[i] in p_chars:
+                part1_len = i + 1
+                part2_text = text[i+1:].strip()
+                if part1_len >= min_length and part1_len <= max_length and len(part2_text) >= min_length:
+                    dist = abs(part1_len - mid)
+                    if dist < min_dist_for_set:
+                        min_dist_for_set = dist
+                        current_best_len_for_set = part1_len
+                    elif dist == min_dist_for_set and part1_len > current_best_len_for_set:
+                        current_best_len_for_set = part1_len
+        if current_best_len_for_set != -1:
+            return current_best_len_for_set # Return as soon as best for current priority found
+
+    lang_conjunctions = conjunctions_map.get(language_code, [])
+    min_dist_p3 = float('inf')
+    best_conj_split_len = -1
+    if lang_conjunctions:
+        for conj in lang_conjunctions:
+            for m in re.finditer(r'\b' + re.escape(conj) + r'\b', text, re.IGNORECASE):
+                part1_len = m.start()
+                part2_text = text[m.start():].strip()
+                if part1_len >= min_length and part1_len <= max_length and len(part2_text) >= min_length:
+                    dist = abs(part1_len - mid)
+                    if dist < min_dist_p3:
+                        min_dist_p3 = dist
+                        best_conj_split_len = part1_len
+                    elif dist == min_dist_p3 and part1_len > best_conj_split_len:
+                        best_conj_split_len = part1_len
+    if best_conj_split_len != -1:
+        return best_conj_split_len
+
+    min_dist_p4 = float('inf')
+    best_word_boundary_len = -1
+    for i in range(min(len(text) - 1, max_length), min_length -1 , -1): # Iterate from right to find split point
+         if text[i].isspace():
+            part1_len = len(text[:i].strip())
+            part2_text = text[i+1:].strip()
+            if part1_len >= min_length and part1_len <= max_length and len(part2_text) >= min_length:
+                dist = abs(part1_len - mid)
+                if dist < min_dist_p4:
+                    min_dist_p4 = dist
+                    best_word_boundary_len = part1_len
+                elif dist == min_dist_p4 and part1_len > best_word_boundary_len: # Prefer longer first part if equidistant
+                    best_word_boundary_len = part1_len
+
+    if best_word_boundary_len != -1:
+        return best_word_boundary_len
+    
+    if len(text) > max_length:
+        cut_text = text[:max_length]
+        last_space = -1
+        for i in range(max_length -1 , min_length -2, -1): # Iterate down to min_length-1 for index
+             if i < 0: break
+             if cut_text[i].isspace():
+                 if len(text[i+1:].strip()) >= min_length:
+                    last_space = i
+                    break
+        if last_space != -1:
+            return last_space # This is index, so len is last_space for text[:last_space]
+        return max_length
+
+    return len(text)
+
+
 def create_speech_blocks(
     srt_content: str,
     session_folder: str,
     video_name: str,
-    target_language: str,
+    target_language: str, # This is XTTS language name like "English" or "en"
     min_chars: int = SPEECH_BLOCK_MIN_CHARS,
     max_chars: int = SPEECH_BLOCK_CHAR_LIMIT,
     merge_threshold: int = SPEECH_BLOCK_MERGE_THRESHOLD
 ) -> List[Dict]:
-    CONJUNCTIONS = {
-        "en": ["and", "but", "or", "because", "although"],
-        "es": ["y", "pero", "o", "porque", "aunque"],
-        "fr": ["et", "mais", "ou", "parce que", "bien que"],
-        "de": ["und", "aber", "oder", "weil", "obwohl"],
-        "it": ["e", "ma", "o", "perché", "sebbene"],
-        "pt": ["e", "mas", "ou", "porque", "embora"],
-        "pl": ["i", "ale", "lub", "ponieważ", "chociaż"],
-        "tr": ["ve", "ama", "veya", "çünkü", "rağmen"],
-        "ru": ["и", "но", "или", "потому что", "хотя"],
-        "nl": ["en", "maar", "of", "omdat", "hoewel"],
-        "cs": ["a", "ale", "nebo", "protože", "ačkoli"],
-        "ar": ["و", "لكن", "أو", "لأن", "رغم أن"],
-        "zh-cn": ["和", "但是", "或者", "因为", "虽然"],
-        "ja": ["そして", "しかし", "または", "なぜなら", "にもかかわらず"],
-        "hu": ["és", "de", "vagy", "mert", "bár"],
-        "ko": ["그리고", "하지만", "또는", "왜냐하면", "비록"]
+    
+    CONJUNCTIONS = { # Defined inside as in original code
+        "en": ["and", "but", "or", "because", "although", "so", "while", "if", "then", "that", "as", "for", "since", "until", "whether"],
+        "es": ["y", "pero", "o", "porque", "aunque", "así", "mientras", "si", "entonces", "que", "como", "pues", "desde", "hasta", "si"],
+        "fr": ["et", "mais", "ou", "parce que", "bien que", "donc", "pendant que", "si", "alors", "que", "comme", "car", "depuis", "jusqu'à", "si"],
+        "de": ["und", "aber", "oder", "weil", "obwohl", "also", "während", "wenn", "dann", "dass", "als", "denn", "seit", "bis", "ob"],
+        "it": ["e", "ma", "o", "perché", "sebbene", "quindi", "mentre", "se", "allora", "che", "come", "poiché", "da quando", "fino a", "se"],
+        "pt": ["e", "mas", "ou", "porque", "embora", "então", "enquanto", "se", "logo", "que", "como", "pois", "desde", "até", "se"],
+        "pl": ["i", "ale", "lub", "ponieważ", "chociaż", "więc", "podczas gdy", "jeśli", "wtedy", "że", "jak", "gdyż", "od", "aż", "czy"],
+        "tr": ["ve", "ama", "veya", "çünkü", "rağmen", "bu yüzden", "iken", "eğer", "o zaman", "ki", "gibi", "zira", "-den beri", "-e kadar", "acaba"],
+        "ru": ["и", "но", "или", "потому что", "хотя", "так что", "пока", "если", "тогда", "что", "как", "ибо", "с", "до", "ли"],
+        "nl": ["en", "maar", "of", "omdat", "hoewel", "dus", "terwijl", "als", "dan", "dat", "zoals", "want", "sinds", "tot", "of"],
+        "cs": ["a", "ale", "nebo", "protože", "ačkoli", "takže", "zatímco", "jestli", "pak", "že", "jako", "neboť", "od", "až", "zda"],
+        "ar": ["و", "لكن", "أو", "لأن", "رغم أن", "لذلك", "بينما", "إذا", "ثم", "أن", "كما", "ف", "منذ", "حتى", "هل"],
+        "zh-cn": ["和", "但是", "或者", "因为", "虽然", "所以", "当", "如果", "那么", "那", "作为", "由于", "自从", "直到", "是否"], # Simplified
+        "ja": ["そして", "しかし", "または", "なぜなら", "にもかかわらず", "だから", "間", "もし", "その時", "と", "ように", "から", "以来", "まで", "かどうか"], # Simplified
+        "hu": ["és", "de", "vagy", "mert", "bár", "tehát", "míg", "ha", "akkor", "hogy", "mint", "hiszen", "óta", "ameddig", "vajon"],
+        "ko": ["그리고", "하지만", "또는", "왜냐하면", "비록", "그래서", "동안", "만약", "그때", "것", "처럼", "때문에", "이후", "까지", "인지"] # Simplified
     }
 
-    def get_xtts_language_code(target_language: str) -> str:
+    def get_xtts_language_code_local(lang_name: str) -> str:
+        # Simplified local version for this function's context
         xtts_language_map = {
             "English": "en", "Spanish": "es", "French": "fr", "German": "de",
             "Italian": "it", "Portuguese": "pt", "Polish": "pl", "Turkish": "tr",
             "Russian": "ru", "Dutch": "nl", "Czech": "cs", "Arabic": "ar",
-            "Chinese": "zh-cn", "Japanese": "ja", "Hungarian": "hu", "Korean": "ko"
+            "Chinese": "zh-cn", "Japanese": "ja", "Hungarian": "hu", "Korean": "ko",
+            # Adding 2-letter codes directly
+            "en": "en", "es": "es", "fr": "fr", "de": "de", "it": "it", "pt": "pt", "pl": "pl",
+            "tr": "tr", "ru": "ru", "nl": "nl", "cs": "cs", "ar": "ar", "zh-cn": "zh-cn",
+            "ja": "ja", "hu": "hu", "ko": "ko", "ca": "ca", "da": "da", "fi": "fi", "el": "el",
+            "is": "is", "lv": "lv", "lt": "lt", "no": "no", "ro": "ro", "sk": "sk", "sl": "sl", "sv": "sv"
         }
-        return xtts_language_map.get(target_language, "en")
+        return xtts_language_map.get(lang_name, lang_name if len(lang_name) == 2 else "en") # Fallback to 'en' or raw 2-letter code
 
-    def merge_close_subtitles(subtitles: List[srt.Subtitle]) -> List[srt.Subtitle]:
-        merged = []
-        for subtitle in subtitles:
-            if not merged or (subtitle.start - merged[-1].end).total_seconds() * 1000 > merge_threshold:
-                merged.append(subtitle)
-            else:
-                merged[-1] = srt.Subtitle(
-                    index=merged[-1].index,
-                    start=merged[-1].start,
-                    end=subtitle.end,
-                    content=merged[-1].content + " " + subtitle.content
-                )
-        return merged
-
-    def find_split_point(text: str, max_length: int, min_length: int, language: str) -> int:
-        sentence_ends = [i for i, char in enumerate(text[:max_length]) if char in '.!?']
-        clause_ends = [i for i, char in enumerate(text[:max_length]) if char in ',;:']
-        conjunctions = CONJUNCTIONS.get(language, [])
-        
-        for end in sentence_ends:
-            if min_length <= end < max_length:
-                return end + 1
-
-        for end in clause_ends:
-            if min_length <= end < max_length:
-                return end + 1
-
-        for conj in conjunctions:
-            pattern = r'\s' + re.escape(conj) + r'\s'
-            matches = list(re.finditer(pattern, text[:max_length]))
-            for match in reversed(matches):
-                if min_length <= match.start() < max_length:
-                    return match.start()
-
-        spaces = [i for i, char in enumerate(text[:max_length]) if char == ' ']
-        if spaces:
-            return max(space for space in spaces if space < max_length)
-
-        return max_length
-
-    language_code = get_xtts_language_code(target_language)
-    is_cjk = language_code in ['zh-cn', 'ja', 'ko']
+    xtts_language_code = get_xtts_language_code_local(target_language)
     
+    splitter_lang_code = XTTS_TO_SENTENCE_SPLITTER_LANG.get(xtts_language_code)
+    sentence_splitter_instance = None
+    if splitter_lang_code:
+        try:
+            sentence_splitter_instance = SentenceSplitter(language=splitter_lang_code)
+        except Exception as e:
+            logger.warning(f"Could not initialize SentenceSplitter for {splitter_lang_code} ({xtts_language_code}): {e}. Will use fallback logic.")
+            splitter_lang_code = None # Force fallback
+
     subtitles = list(srt.parse(srt_content))
-    merged_subtitles = merge_close_subtitles(subtitles)
     
-    speech_blocks = []
+    merged_subtitles_intermediate = []
+    if not subtitles: return []
+
+    for subtitle in subtitles:
+        if not merged_subtitles_intermediate or \
+           (subtitle.start - merged_subtitles_intermediate[-1].end).total_seconds() * 1000 > merge_threshold:
+            merged_subtitles_intermediate.append(subtitle)
+        else:
+            merged_subtitles_intermediate[-1] = srt.Subtitle(
+                index=merged_subtitles_intermediate[-1].index, # Keeps index of the first sub in merge
+                start=merged_subtitles_intermediate[-1].start,
+                end=subtitle.end,
+                content=(merged_subtitles_intermediate[-1].content + " " + subtitle.content).strip()
+            )
     
-    for subtitle in merged_subtitles:
-        if (is_cjk or len(subtitle.content) <= max_chars) and subtitle.content[-1] in '.!?':
-            speech_blocks.append({
-                "number": str(len(speech_blocks) + 1).zfill(4),
-                "text": subtitle.content,
-                "subtitles": [subtitle.index]
-            })
+    all_speech_block_parts: List[Dict] = []
+
+    for merged_sub in merged_subtitles_intermediate:
+        subtitle_text = merged_sub.content.strip()
+        subtitle_indices = [merged_sub.index] # Assuming index of merged sub is what's tracked
+
+        if not subtitle_text:
             continue
 
-        remaining_text = subtitle.content
-        subtitle_blocks = []
+        current_sub_texts: List[str] = []
 
-        while remaining_text:
-            if len(remaining_text) <= max_chars:
-                subtitle_blocks.append(remaining_text)
-                break
-
-            split_point = find_split_point(remaining_text, max_chars, min_chars, language_code)
-            
-            if split_point == max_chars:
-                words = remaining_text[:max_chars].split()
-                if len(words) > 1:
-                    split_point = len(' '.join(words[:-1]))
-                else:
-                    split_point = max_chars
-
-            subtitle_blocks.append(remaining_text[:split_point].strip())
-            remaining_text = remaining_text[split_point:].strip()
-
-        for i, block in enumerate(subtitle_blocks):
-            if i == len(subtitle_blocks) - 1 and len(block) < min_chars and speech_blocks:
-                speech_blocks[-1]["text"] += " " + block
-                speech_blocks[-1]["subtitles"].append(subtitle.index)
-            else:
-                speech_blocks.append({
-                    "number": str(len(speech_blocks) + 1).zfill(4),
-                    "text": block,
-                    "subtitles": [subtitle.index]
+        if len(subtitle_text) >= min_chars and len(subtitle_text) <= max_chars:
+            current_sub_texts.append(subtitle_text)
+        elif len(subtitle_text) < min_chars: # Too short from the start
+            current_sub_texts.append(subtitle_text)
+        else: # Needs splitting
+            if sentence_splitter_instance and splitter_lang_code:
+                raw_sentences = sentence_splitter_instance.split(text=subtitle_text)
+                for sentence in raw_sentences:
+                    sentence = sentence.strip()
+                    if not sentence: continue
+                    if len(sentence) >= min_chars and len(sentence) <= max_chars:
+                        current_sub_texts.append(sentence)
+                    elif len(sentence) < min_chars: # Sentence too short
+                         current_sub_texts.append(sentence)
+                    else: # Sentence too long, needs further splitting
+                        split_parts = _split_further(sentence, xtts_language_code, max_chars, min_chars, CONJUNCTIONS)
+                        current_sub_texts.extend(p for p in split_parts if p)
+            else: # Fallback logic
+                remaining_text = subtitle_text
+                while remaining_text:
+                    if len(remaining_text) <= max_chars:
+                        if remaining_text: current_sub_texts.append(remaining_text)
+                        break
+                    
+                    split_len = _fallback_original_find_split_point(remaining_text, max_chars, min_chars, xtts_language_code, CONJUNCTIONS)
+                    
+                    part_to_add = remaining_text[:split_len].strip()
+                    if part_to_add: current_sub_texts.append(part_to_add)
+                    remaining_text = remaining_text[split_len:].strip()
+        
+        # Add processed texts for this merged_sub to all_speech_block_parts
+        for text_part in current_sub_texts:
+            if text_part: # Ensure not empty
+                 all_speech_block_parts.append({
+                    "text": text_part,
+                    "subtitles": subtitle_indices 
                 })
+    
+    # Final assembly and merging of small parts
+    final_speech_blocks: List[Dict] = []
+    if not all_speech_block_parts:
+        if os.path.exists(session_folder) and video_name: # Only try to save if path components exist
+            json_output_path = os.path.join(session_folder, f"{video_name}_speech_blocks.json")
+            with open(json_output_path, 'w', encoding='utf-8') as json_file:
+                json.dump([], json_file, ensure_ascii=False, indent=2)
+        return []
+
+    for part_data in all_speech_block_parts:
+        text = part_data["text"]
+        indices = part_data["subtitles"]
+
+        if not final_speech_blocks:
+            if text: # Don't add if text is empty
+                final_speech_blocks.append({
+                    "number": str(len(final_speech_blocks) + 1).zfill(4),
+                    "text": text,
+                    "subtitles": indices
+                })
+        else:
+            if len(text) < min_chars and text and \
+               len(final_speech_blocks[-1]["text"]) + len(text) + 1 <= max_chars:
+                final_speech_blocks[-1]["text"] += " " + text
+                final_speech_blocks[-1]["subtitles"] = sorted(list(set(final_speech_blocks[-1]["subtitles"] + indices)))
+            elif text: # Add as new block if it's not empty
+                final_speech_blocks.append({
+                    "number": str(len(final_speech_blocks) + 1).zfill(4),
+                    "text": text,
+                    "subtitles": indices
+                })
+    
+    # Renumber blocks after all merging is done
+    for i, block in enumerate(final_speech_blocks):
+        block["number"] = str(i + 1).zfill(4)
 
     # Save the speech blocks as JSON
-    json_output_path = os.path.join(session_folder, f"{video_name}_speech_blocks.json")
-    with open(json_output_path, 'w', encoding='utf-8') as json_file:
-        json.dump(speech_blocks, json_file, ensure_ascii=False, indent=2)
+    if os.path.exists(session_folder) and video_name: # Check to prevent error if called without valid session/name
+        json_output_path = os.path.join(session_folder, f"{video_name}_speech_blocks.json")
+        try:
+            with open(json_output_path, 'w', encoding='utf-8') as json_file:
+                json.dump(final_speech_blocks, json_file, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save speech blocks JSON: {e}")
+    else:
+        logger.warning("Session folder or video name not available, skipping saving of speech_blocks.json")
 
-    return speech_blocks
+
+    return final_speech_blocks
 def get_xtts_language_code(target_language: str) -> str:
     xtts_language_map: Dict[str, str] = {
         "English": "en",
@@ -1324,13 +1590,51 @@ def create_alignment_blocks(session_folder: str, video_name: str, target_languag
 
     return alignment_blocks
 
-def align_audio_blocks(alignment_blocks: List[Dict], session_folder: str) -> str:
+def align_audio_blocks(alignment_blocks: List[Dict], session_folder: str, delay_start: int = 1500, speed_up: int = 100) -> str:
     final_audio = AudioSegment.silent(duration=0)
-    current_time = 0  # Time in milliseconds
+    current_time = 0
     total_shift = 0
 
     def timedelta_to_ms(td):
         return td.total_seconds() * 1000
+
+    def speed_up_audio_ffmpeg(audio_segment, factor, session_folder):
+        """Speed up audio without changing pitch using FFmpeg's atempo filter"""
+        import subprocess
+        
+        temp_input = os.path.join(session_folder, "temp_speedup_input.wav")
+        temp_output = os.path.join(session_folder, "temp_speedup_output.wav")
+        
+        try:
+            audio_segment.export(temp_input, format="wav")
+            
+            atempo_filters = []
+            remaining_factor = factor
+            
+            while remaining_factor > 2.0:
+                atempo_filters.append("atempo=2.0")
+                remaining_factor /= 2.0
+            
+            while remaining_factor < 0.5:
+                atempo_filters.append("atempo=0.5")
+                remaining_factor /= 0.5
+            
+            if abs(remaining_factor - 1.0) > 0.01:
+                atempo_filters.append(f"atempo={remaining_factor:.3f}")
+            
+            if not atempo_filters:
+                return audio_segment
+                
+            filter_string = ",".join(atempo_filters)
+            
+            cmd = ['ffmpeg', '-i', temp_input, '-af', filter_string, '-y', temp_output]
+            subprocess.run(cmd, check=True, capture_output=True)
+            return AudioSegment.from_wav(temp_output)
+            
+        finally:
+            for temp_file in [temp_input, temp_output]:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
 
     sentence_wavs_folder = os.path.join(session_folder, "Sentence_wavs")
 
@@ -1350,6 +1654,7 @@ def align_audio_blocks(alignment_blocks: List[Dict], session_folder: str) -> str
             final_audio += AudioSegment.silent(duration=silence_duration)
             current_time = adjusted_block_start
 
+        # Load and combine audio files
         block_audio = AudioSegment.silent(duration=0)
         for audio_file in block["audio_files"]:
             wav_path = os.path.join(sentence_wavs_folder, audio_file)
@@ -1361,23 +1666,94 @@ def align_audio_blocks(alignment_blocks: List[Dict], session_folder: str) -> str
             else:
                 logging.error(f"Audio file not found: {wav_path}")
 
-        final_audio += block_audio
-        current_time += len(block_audio)
+        original_audio_duration = len(block_audio)
+        processed_audio = block_audio
+        audio_delay = 0
 
-        if len(block_audio) > block_duration:
-            total_shift += len(block_audio) - block_duration
+        # DELAY LOGIC: Only apply if no accumulated shift AND subtitle is longer
+        if original_audio_duration < block_duration and total_shift <= 0:
+            available_time = block_duration - original_audio_duration
+            max_delay = min(delay_start, int(available_time * 0.7))
+            audio_delay = max_delay
+            logging.info(f"Block {i+1}: Applying delay of {audio_delay}ms "
+                       f"(audio: {original_audio_duration}ms, subtitle: {block_duration}ms)")
+
+        # SPEED-UP LOGIC: Different constraints based on whether we have accumulated shift
+        should_speed_up = False
+        actual_speedup_factor = 1.0
+        speed_up_reason = ""
+
+        if total_shift > 0 and speed_up > 100:
+            # CASE 1: We have accumulated shift - prioritize eliminating it
+            should_speed_up = True
+            speed_up_reason = f"eliminating accumulated shift of {total_shift}ms"
+            
+            # Calculate speedup needed to eliminate the shift over this audio duration
+            speedup_needed_for_shift = (original_audio_duration + total_shift) / original_audio_duration
+            max_allowed_speedup = speed_up / 100.0
+            
+            # Compare against SHIFT duration, not subtitle duration
+            actual_speedup_factor = min(speedup_needed_for_shift, max_allowed_speedup)
+            
+            logging.info(f"Block {i+1}: Shift elimination - need {speedup_needed_for_shift:.2f}x, "
+                       f"max allowed {max_allowed_speedup:.2f}x, using {actual_speedup_factor:.2f}x")
+            
+        elif total_shift <= 0 and original_audio_duration > block_duration and speed_up > 100:
+            # CASE 2: No accumulated shift, but current audio longer than subtitle
+            should_speed_up = True
+            speed_up_reason = "fitting current audio to subtitle"
+            
+            # Calculate speedup needed to fit current subtitle
+            speedup_needed_for_subtitle = original_audio_duration / block_duration
+            max_allowed_speedup = speed_up / 100.0
+            
+            # Compare against SUBTITLE duration (standard case)
+            actual_speedup_factor = min(speedup_needed_for_subtitle, max_allowed_speedup)
+            
+            logging.info(f"Block {i+1}: Subtitle fitting - need {speedup_needed_for_subtitle:.2f}x, "
+                       f"max allowed {max_allowed_speedup:.2f}x, using {actual_speedup_factor:.2f}x")
+
+        # Apply speed-up if needed
+        if should_speed_up and actual_speedup_factor > 1.01:
+            processed_audio = speed_up_audio_ffmpeg(block_audio, actual_speedup_factor, session_folder)
+            new_duration = len(processed_audio)
+            logging.info(f"Block {i+1}: Applied {actual_speedup_factor:.2f}x speedup for {speed_up_reason} "
+                       f"({original_audio_duration}ms -> {new_duration}ms)")
+        elif total_shift > 0 and speed_up <= 100:
+            logging.info(f"Block {i+1}: Would speed up for shift elimination, but speed_up={speed_up} (disabled)")
+        elif should_speed_up:
+            logging.info(f"Block {i+1}: Speedup factor {actual_speedup_factor:.2f}x too small, skipping")
+
+        # Add delay and processed audio
+        if audio_delay > 0:
+            final_audio += AudioSegment.silent(duration=audio_delay)
+            current_time += audio_delay
+
+        final_audio += processed_audio
+        current_time += len(processed_audio)
+
+        # Update total_shift based on actual timing
+        actual_audio_duration = len(processed_audio) + audio_delay
+        
+        if actual_audio_duration > block_duration:
+            additional_shift = actual_audio_duration - block_duration
+            total_shift += additional_shift
+            logging.info(f"Block {i+1}: Added {additional_shift}ms to shift, total_shift now: {total_shift}ms")
         else:
-            silence_needed = block_duration - len(block_audio)
-            if silence_needed > total_shift:
+            silence_needed = block_duration - actual_audio_duration
+            if silence_needed >= total_shift:
                 silence_to_add = silence_needed - total_shift
                 final_audio += AudioSegment.silent(duration=silence_to_add)
                 current_time += silence_to_add
+                logging.info(f"Block {i+1}: Eliminated all shift ({total_shift}ms) plus {silence_to_add}ms silence")
                 total_shift = 0
             else:
                 total_shift -= silence_needed
+                logging.info(f"Block {i+1}: Reduced shift by {silence_needed}ms, total_shift now: {total_shift}ms")
 
     output_path = os.path.join(session_folder, "aligned_audio.wav")
     final_audio.export(output_path, format="wav")
+    logging.info(f"Alignment completed. Final total_shift: {total_shift}ms")
     return output_path
 
 
@@ -1620,7 +1996,7 @@ def correct_subtitles(
 
     return corrected_responses
 
-def sync_audio_video(session_folder: str, input_video: str = None) -> None:
+def sync_audio_video(session_folder: str, input_video: str = None, delay_start: int = 1500, speed_up: int = 100) -> None:
     # Define XTTS language codes
     xtts_languages = {
         "en": "English", "es": "Spanish", "fr": "French", "de": "German",
@@ -1677,8 +2053,8 @@ def sync_audio_video(session_folder: str, input_video: str = None) -> None:
     alignment_blocks = create_alignment_blocks(session_folder, video_name, xtts_languages[speech_blocks_language], False, json_path)
     logging.info(f"Created {len(alignment_blocks)} alignment blocks")
 
-    # Align audio blocks
-    aligned_audio_path = align_audio_blocks(alignment_blocks, session_folder)
+    # Align audio blocks with delay and speed-up parameters
+    aligned_audio_path = align_audio_blocks(alignment_blocks, session_folder, delay_start, speed_up)
     logging.info(f"Audio alignment completed: {aligned_audio_path}")
 
     # Mix audio tracks
@@ -1700,24 +2076,25 @@ def main():
     parser.add_argument('-translation_memory', action='store_true', help="Enable translation memory/glossary feature")
     parser.add_argument('-tts_voice', help="Path to TTS voice WAV file")
     parser.add_argument('-whisper_model', choices=['base', 'small', 'small.en', 'medium', 'medium.en', 'large-v2', 'large-v3'], default='large-v2', help="Whisper model to use for transcription (default: large-v2)")
+    parser.add_argument('-align_model', help="Custom alignment model for WhisperX (Hugging Face ID or local path). If not set, defaults based on source language.") # New argument
     parser.add_argument('-openai_api', help="OpenAI API key")
-    parser.add_argument('-llmapi', choices=['anthropic', 'openai', 'local', 'deepl', 'openrouter', 'gemini'], 
+    parser.add_argument('-llmapi', choices=['anthropic', 'openai', 'local', 'deepl', 'openrouter', 'gemini'],
                         default='anthropic', help="LLM API to use (default: anthropic)")
-    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4.1', 'gpt-4.1-mini', 
-                    'deepseek-r1', 'qwq-32b', 'deepseek-v3', 'gemini-pro', 'gemini-flash'], 
+    parser.add_argument('-llm-model', choices=['haiku', 'sonnet', 'gpt-4.1', 'gpt-4.1-mini',
+                    'deepseek-r1', 'qwq-32b', 'deepseek-v3', 'gemini-pro', 'gemini-flash'],
                     help="LLM model to use")
     parser.add_argument('-gemini_api', help="Google Gemini API key")
     parser.add_argument('-session', help="Session name or path. If not provided, a new session folder will be created.")
     parser.add_argument('-merge_threshold', type=int, default=SPEECH_BLOCK_MERGE_THRESHOLD, help=f"Maximum time difference (in ms) between subtitles to be merged (default: {SPEECH_BLOCK_MERGE_THRESHOLD})")
-    parser.add_argument('-task', choices=['tts', 'full', 'transcribe', 'translate', 'speech_blocks', 'sync', 'equalize', 'correct'], default='full', help="Task to perform (default: full)")    
+    parser.add_argument('-task', choices=['tts', 'full', 'transcribe', 'translate', 'speech_blocks', 'sync', 'equalize', 'correct'], default='full', help="Task to perform (default: full)")
     parser.add_argument('-t_prompt', help="Custom translation prompt")
     parser.add_argument('-eval_prompt', help="Custom evaluation prompt")
     parser.add_argument('-gloss_prompt', help="Custom glossary prompt")
     parser.add_argument('-sys_prompt', help="Custom system prompt")
     parser.add_argument('-equalize', action='store_true', help="Apply SRT equalizer to the final subtitle file")
-    parser.add_argument('-max_line_length', type=int, default=42, help="Maximum line length for SRT equalization (default: 60)")
+    parser.add_argument('-max_line_length', type=int, default=42, help="Maximum line length for SRT equalization (default: 42)") # Used with -equalize flag
     parser.add_argument('-api_deepl', help="DeepL API key")
-    parser.add_argument('-characters', type=int, default=60, help="Maximum line length for SRT equalization (default: 60)")
+    parser.add_argument('-characters', type=int, default=60, help="Maximum line length for SRT equalization (default: 60)") # Used with task=='equalize'
     parser.add_argument('-v', '--video', help="Input video file for syncing (optional)")
     parser.add_argument('-correct', action='store_true', help="Enable subtitle correction before translation")
     parser.add_argument('-correct_prompt', help="Additional context/instructions for subtitle correction (optional)")
@@ -1726,7 +2103,11 @@ def main():
     parser.add_argument('-translate_prompt', help="Additional context/instructions for translation (optional)")
     parser.add_argument('-thinking', action='store_true', help="Enable Claude's extended thinking (only for Sonnet model)")
     parser.add_argument('-thinking_tokens', type=int, default=4000, help="Budget tokens for Claude's extended thinking (default: 4000)")
-    
+    parser.add_argument('--delay_start', type=int, default=1500, 
+                        help="Delay audio start by this many milliseconds when subtitle is longer than audio (default: 1500)")
+    parser.add_argument('--speed_up', type=int, default=115, 
+                        help="Maximum speed-up percentage when audio is longer than subtitle (default: 100, meaning no speed-up)")
+
     # OpenRouter provider routing arguments
     parser.add_argument('-provider', help="OpenRouter provider to prioritize (comma-separated, e.g., 'Anthropic,OpenAI')")
     parser.add_argument('-sort', choices=['price', 'throughput', 'latency'], help="OpenRouter provider sorting strategy")
@@ -1735,53 +2116,68 @@ def main():
     parser.add_argument('-ignore', help="OpenRouter providers to ignore (comma-separated list)")
     parser.add_argument('-data-collection', choices=['allow', 'deny'], default='allow', help="OpenRouter data collection policy")
     parser.add_argument('-require-parameters', action='store_true', help="Require providers to support all parameters")
-    
+    parser.add_argument('-whisper_prompt', help="Custom initial prompt to guide Whisper transcription. If not specified, uses a default prompt for better punctuation.")
+
+
     args = parser.parse_args()
 
     if args.thinking and (args.llmapi != 'anthropic' or args.llm_model != 'sonnet'):
         logging.warning("Extended thinking is only available with Claude Sonnet model. Ignoring -thinking parameter.")
         args.thinking = False
-    
-    if args.task != 'sync' and not args.input:
-        parser.error("the following arguments are required: -i/--input")
 
+    if args.task != 'sync' and not args.input: # Also 'equalize' task needs input. This check will be done later for 'equalize'.
+        parser.error("the following arguments are required: -i/--input (unless task is 'sync')")
+
+    # Determine LLM API if model implies it
     if args.llm_model in ['gpt-4.1', 'gpt-4.1-mini']:
         args.llmapi = 'openai'
     elif args.llm_model in ['gemini-pro', 'gemini-flash']:
         args.llmapi = 'gemini'
 
+    # Model name mappings
     openai_model_mapping = {
         'gpt-4.1': 'gpt-4.1',
         'gpt-4.1-mini': 'gpt-4.1-mini'
     }
+
     gemini_model_mapping = {
-        'gemini-flash': 'gemini-2.5-flash-preview-04-17',
-        'gemini-pro': 'gemini-2.5-pro-exp-03-25'
+        'gemini-flash': 'gemini-2.5-flash-preview-05-20',
+        'gemini-pro': 'gemini-2.5-pro-preview-05-06'
     }
 
+    model = None # Initialize model
     if args.llmapi == 'anthropic':
         if not args.llm_model or args.llm_model not in ['haiku', 'sonnet']:
-            args.llm_model = 'sonnet'
-        model = "claude-3-5-haiku-latest" if args.llm_model == 'haiku' else "claude-3-7-sonnet-latest"
+            args.llm_model = 'sonnet' # Default for anthropic
+        # Using the exact model names from the original script for Anthropic
+        model = "claude-3-haiku-20240307" if args.llm_model == 'haiku' else "claude-3-5-sonnet-20240620"
     elif args.llmapi == 'openai':
         if not args.llm_model or args.llm_model not in ['gpt-4.1', 'gpt-4.1-mini']:
-            args.llm_model = 'gpt-4.1-mini'
+            args.llm_model = 'gpt-4.1-mini' # Default for openai
         model = openai_model_mapping[args.llm_model]
     elif args.llmapi == 'openrouter':
-        if not args.llm_model or args.llm_model not in ['deepseek-r1', 'qwq-32b']:
-            args.llm_model = 'deepseek-r1'
-        model = f"deepseek/{args.llm_model}" if args.llm_model == 'deepseek-r1' else f"qwen/{args.llm_model}"
+        if not args.llm_model or args.llm_model not in ['deepseek-r1', 'qwq-32b', 'deepseek-v3']:
+            args.llm_model = 'deepseek-r1' # Default for openrouter
+        # Corrected logic for OpenRouter model name construction
+        if 'deepseek' in args.llm_model: # Handles 'deepseek-r1', 'deepseek-v3'
+            model = f"deepseek/{args.llm_model}" # e.g. deepseek/deepseek-r1, deepseek/deepseek-v3
+        elif args.llm_model == 'qwq-32b':
+            model = f"qwen/{args.llm_model}" # e.g. qwen/qwq-32b (or qwen/qwen-32b-chat if that's the ID)
+        else: # Should ideally not be reached if default is set and choices are exhaustive
+            model = args.llm_model # Fallback, user provides full ID
+
+        # Handle model name shortcuts for OpenRouter (appending :nitro or :floor)
+        if model: # Ensure model is assigned before trying to append
+            if args.sort == 'throughput' and ':nitro' not in model:
+                model += ':nitro'
+            elif args.sort == 'price' and ':floor' not in model:
+                model += ':floor'
     elif args.llmapi == 'gemini':
         if not args.llm_model or args.llm_model not in ['gemini-pro', 'gemini-flash']:
-            args.llm_model = 'gemini-flash'
-        model = gemini_model_mapping[args.llm_model]
-        # Handle model name shortcuts for OpenRouter
-        if args.sort == 'throughput' and ':nitro' not in model:
-            model += ':nitro'
-        elif args.sort == 'price' and ':floor' not in model:
-            model += ':floor'
+            args.llm_model = 'gemini-flash' # Default for gemini
+        model = gemini_model_mapping[args.llm_model] # Uses the user-constrained mapping
     elif args.llmapi == 'local':
-        model = None
+        model = None # No specific model name for local, it's configured in the local server
     elif args.llmapi == 'deepl':
         model = None
         args.api_deepl = args.api_deepl or os.environ.get('DEEPL_API_KEY') or input("Please enter your DeepL API key: ")
@@ -1794,9 +2190,9 @@ def main():
         provider_params = {}
         if args.provider:
             provider_params['order'] = [p.strip() for p in args.provider.split(',')]
-        if args.sort and ':nitro' not in model and ':floor' not in model:
+        if args.sort: # This is a separate param for OpenRouter's routing logic
             provider_params['sort'] = args.sort
-        if hasattr(args, 'allow_fallbacks'):
+        if hasattr(args, 'allow_fallbacks'): # Check existence due to dest
             provider_params['allow_fallbacks'] = args.allow_fallbacks
         if args.ignore:
             provider_params['ignore'] = [p.strip() for p in args.ignore.split(',')]
@@ -1804,44 +2200,93 @@ def main():
             provider_params['data_collection'] = args.data_collection
         if args.require_parameters:
             provider_params['require_parameters'] = True
-        # Only include non-empty provider_params
-        if not provider_params:
+        if not provider_params: # Only include if there's something in it
             provider_params = None
+
+    # Set default alignment models based on language if not specified by user
+    if not args.align_model:
+        language_align_models = {
+            "pl": "jonatasgrosman/wav2vec2-xls-r-1b-polish",
+            "nl": "GroNLP/wav2vec2-dutch-large-ft-cgn",
+            "de": "aware-ai/wav2vec2-xls-r-1b-german",
+            "en": "jonatasgrosman/wav2vec2-xls-r-1b-english",
+            "fr": "jonatasgrosman/wav2vec2-xls-r-1b-french",
+            "it": "jonatasgrosman/wav2vec2-xls-r-1b-italian",
+            "ru": "jonatasgrosman/wav2vec2-xls-r-1b-russian",
+            "es": "jonatasgrosman/wav2vec2-xls-r-1b-spanish"
+        }
+        source_lang_lower = args.source_language.lower()
+        lang_to_code_map = {
+            "english": "en",
+            "polish": "pl", "polski": "pl",
+            "dutch": "nl", "nederlands": "nl",
+            "german": "de", "deutsch": "de",
+            "french": "fr", "français": "fr",
+            "italian": "it", "italiano": "it",
+            "russian": "ru", "русский": "ru", "rus": "ru",
+            "spanish": "es", "español": "es",
+            # Direct short codes
+            "en": "en", "pl": "pl", "nl": "nl", "de": "de",
+            "fr": "fr", "it": "it", "ru": "ru", "es": "es"
+        }
+        lookup_code = lang_to_code_map.get(source_lang_lower)
+        if lookup_code:
+            args.align_model = language_align_models.get(lookup_code)
+            if args.align_model:
+                logging.info(f"Using default alignment model for {args.source_language} (lookup code: {lookup_code}): {args.align_model}")
+            else:
+                 logging.info(f"Language code {lookup_code} for {args.source_language} found, but no specific default alignment model listed in internal map. WhisperX will use its own default.")
+        else:
+            logging.info(f"No mapping found for source language '{args.source_language}' to a short code for default alignment model lookup. WhisperX will use its own default alignment model.")
+    else:
+        logging.info(f"User-specified alignment model: {args.align_model}")
+
 
     if args.task == 'equalize':
         if not args.input:
             parser.error("the following arguments are required for 'equalize' task: -i/--input")
-
         input_srt_path = os.path.abspath(os.path.expanduser(args.input))
         output_srt_path = os.path.splitext(input_srt_path)[0] + "_equalized.srt"
-
         logging.info(f"Performing SRT equalization on: {input_srt_path}")
-        perform_equalization(input_srt_path, output_srt_path, args.characters)
+        perform_equalization(input_srt_path, output_srt_path, args.characters) # Uses args.characters (default 60)
         logging.info(f"Equalized SRT file saved as: {output_srt_path}")
         return
 
     if args.task == 'sync':
         if not args.session:
-            raise ValueError("Session folder must be specified for the 'sync' task")
-        sync_audio_video(args.session, args.video)
+            parser.error("Session folder (--session) must be specified for the 'sync' task")
+        sync_audio_video(args.session, args.video, args.delay_start, args.speed_up)
         logging.info("Synchronization completed. Ending process.")
-        return 
+        return
 
+    # General setup for tasks requiring input file
+    video_path = ""
+    video_name = ""
     if args.input.startswith(('http://', 'https://', 'www.')):
         logging.info(f"Detected URL input: {args.input}")
-        temp_session_folder = get_or_create_session_folder("temp")
+        temp_session_folder = get_or_create_session_folder("temp_download") # Ensure unique name
         video_path, video_name = download_from_url(args.input, temp_session_folder)
         logging.info(f"Video downloaded: {video_path}")
-        
+
         session_folder = get_or_create_session_folder(video_name, args.session)
         if session_folder != temp_session_folder:
-            shutil.move(video_path, session_folder)
-            shutil.rmtree(temp_session_folder)
-        video_path = os.path.join(session_folder, os.path.basename(video_path))
+            # Ensure target directory exists for shutil.move
+            os.makedirs(os.path.dirname(os.path.join(session_folder, os.path.basename(video_path))), exist_ok=True)
+            shutil.move(video_path, os.path.join(session_folder, os.path.basename(video_path)))
+            # Only remove temp_session_folder if it's not the same as session_folder and it exists
+            if os.path.exists(temp_session_folder) and os.path.abspath(temp_session_folder) != os.path.abspath(session_folder):
+                 try:
+                    shutil.rmtree(temp_session_folder)
+                 except OSError as e:
+                    logging.warning(f"Could not remove temporary download folder {temp_session_folder}: {e}")
+
+        video_path = os.path.join(session_folder, os.path.basename(video_path)) # Update video_path to new location
     else:
         video_path = os.path.abspath(os.path.expanduser(args.input))
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
-        video_name = ''.join(e for e in video_name if e.isalnum() or e in ['-', '_'])
+        video_name_raw = os.path.splitext(os.path.basename(video_path))[0]
+        video_name = ''.join(e for e in video_name_raw if e.isalnum() or e in ['-', '_'])
+        if not video_name: # Handle cases where sanitization results in empty name
+            video_name = "default_video_name"
         session_folder = get_or_create_session_folder(video_name, args.session)
 
     setup_logging(session_folder)
@@ -1850,20 +2295,22 @@ def main():
     logging.info(f"Input file: {video_path}")
     logging.info(f"Session folder: {session_folder}")
     logging.info(f"Using LLM API: {args.llmapi}")
-    logging.info(f"Using LLM model: {model}")
-    if provider_params:
-        logging.info(f"OpenRouter provider params: {provider_params}")
+    if model: logging.info(f"Using LLM model: {model}")
+    if provider_params: logging.info(f"OpenRouter provider params: {provider_params}")
 
-    translation_prompt = args.t_prompt if args.t_prompt else TRANSLATION_PROMPT_TEMPLATE
-    evaluation_prompt = args.eval_prompt if args.eval_prompt else EVALUATION_PROMPT_TEMPLATE
-    glossary_prompt = args.gloss_prompt if args.gloss_prompt else GLOSSARY_INSTRUCTIONS_TRANSLATION
-    system_prompt = args.sys_prompt if args.sys_prompt else CUSTOM_SYSTEM_PROMPT
+    translation_prompt_template_to_use = args.t_prompt if args.t_prompt else (TRANSLATION_PROMPT_TEMPLATE_COT if args.cot else TRANSLATION_PROMPT_TEMPLATE)
+    evaluation_prompt_template_to_use = args.eval_prompt if args.eval_prompt else EVALUATION_PROMPT_TEMPLATE
+    glossary_prompt_instructions_to_use = args.gloss_prompt if args.gloss_prompt else GLOSSARY_INSTRUCTIONS_TRANSLATION
+    system_prompt_to_use = args.sys_prompt if args.sys_prompt else CUSTOM_SYSTEM_PROMPT
+    correction_prompt_template_to_use = args.correct_prompt if args.correct_prompt else (CORRECTION_PROMPT_TEMPLATE_COT if args.cot else CORRECTION_PROMPT_TEMPLATE)
+
+
+    srt_content = ""
+    srt_path = "" # Initialize srt_path
 
     try:
-        if args.task in ['full', 'translate', 'translation', 'correct']:
+        if args.task in ['full', 'translate', 'translation', 'correct', 'transcribe', 'speech_blocks']: # Tasks that need SRT
             logging.info(f"Current task: {args.task}")
-            logging.info(f"Selected LLM API: {args.llmapi}")
-
             if args.llmapi == 'anthropic':
                 args.ant_api = args.ant_api or os.environ.get('ANTHROPIC_API_KEY') or input("Please enter your Anthropic API key: ")
             elif args.llmapi == 'openai':
@@ -1875,149 +2322,127 @@ def main():
                     raise ValueError("OPENROUTER_API environment variable must be set")
             elif args.llmapi == 'local':
                 try:
-                    response = requests.get("http://127.0.0.1:5000/v1/models")
+                    response = requests.get("http://127.0.0.1:5000/v1/models") # Test connection
                     response.raise_for_status()
                     logging.info("Successfully connected to the local Text Generation WebUI API")
                 except requests.RequestException as e:
                     logging.error(f"Failed to connect to the local Text Generation WebUI API: {str(e)}")
                     logging.error("Please ensure that the Text Generation WebUI is running and accessible at http://127.0.0.1:5000")
-                    return
+                    return # Exit if local API not available
 
-        if video_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.wav')):
-            audio_path = extract_audio(video_path, session_folder, video_name)
-            logging.info(f"Audio extracted: {audio_path}")
-            srt_path = transcribe_audio(audio_path, args.source_language, session_folder, video_name, args.whisper_model)
-            logging.info(f"Transcription completed: {srt_path}")
+            if video_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.wav', '.m4a', '.aac', '.flac', '.mp3', '.ogg', '.opus')):
+                if not os.path.exists(video_path):
+                     parser.error(f"Video/Audio file not found: {video_path}")
+                audio_path = extract_audio(video_path, session_folder, video_name)
+                logging.info(f"Audio extracted: {audio_path}")
+                whisper_prompt = args.whisper_prompt or DEFAULT_WHISPER_PROMPT
+                srt_path = transcribe_audio(audio_path, args.source_language, session_folder, video_name, args.whisper_model, args.align_model, whisper_prompt)
+                logging.info(f"Transcription completed: {srt_path}")
+            elif video_path.lower().endswith('.srt'):
+                if not os.path.exists(video_path):
+                     parser.error(f"SRT file not found: {video_path}")
+                srt_path = os.path.join(session_folder, f"{video_name}_input.srt") # Copy to session folder
+                shutil.copy(video_path, srt_path)
+                logging.info(f"Using input subtitles: {srt_path}")
+            else:
+                parser.error(f"Unsupported input file type: {video_path}. Must be video, audio, or SRT.")
+
             with open(srt_path, 'r', encoding='utf-8') as f:
                 srt_content = f.read()
-            
-            # Renumber subtitles to ensure consecutive numbering
-            original_srt_content = srt_content
-            srt_content = renumber_subtitles(srt_content)
-            if srt_content != original_srt_content:
-                renumbered_srt_path = os.path.join(session_folder, f"{video_name}_renumbered.srt")
-                with open(renumbered_srt_path, 'w', encoding='utf-8') as f:
-                    f.write(srt_content)
-                logging.info(f"Non-consecutive subtitle numbers detected. Renumbered subtitles saved: {renumbered_srt_path}")
-            
-        elif video_path.lower().endswith('.srt'):
-            with open(video_path, 'r', encoding='utf-8') as f:
-                srt_content = f.read()
-            logging.info(f"Using input subtitles: {video_path}")
-            
-            # Renumber subtitles to ensure consecutive numbering
-            original_srt_content = srt_content
-            srt_content = renumber_subtitles(srt_content)
-            if srt_content != original_srt_content:
-                renumbered_srt_path = os.path.join(session_folder, f"{video_name}_renumbered.srt")
-                with open(renumbered_srt_path, 'w', encoding='utf-8') as f:
-                    f.write(srt_content)
-                logging.info(f"Non-consecutive subtitle numbers detected. Renumbered subtitles saved: {renumbered_srt_path}")
 
-        # Handle the correct task
-        if args.task == 'correct':
-            logging.info("Starting standalone subtitle correction")
-            translation_blocks = create_translation_blocks(srt_content, args.llm_char, args.source_language)
+            original_srt_content = srt_content
+            srt_content = renumber_subtitles(srt_content)
+            if srt_content != original_srt_content:
+                renumbered_srt_path = os.path.join(session_folder, f"{video_name}_renumbered.srt")
+                with open(renumbered_srt_path, 'w', encoding='utf-8') as f:
+                    f.write(srt_content)
+                logging.info(f"Non-consecutive subtitle numbers detected. Renumbered subtitles saved: {renumbered_srt_path}")
+                # srt_path = renumbered_srt_path # Update srt_path to the renumbered one if further processing uses it by path
+
+        # Handle the correct task (standalone) or correction flag
+        if args.task == 'correct' or args.correct:
+            logging.info("Starting subtitle correction process...")
+            # Use original srt_content for creating initial blocks
+            correction_translation_blocks = create_translation_blocks(srt_content, args.llm_char, args.source_language)
             corrected_blocks = correct_subtitles(
-                translation_blocks,
+                correction_translation_blocks,
                 args.source_language,
-                args.correct_prompt,
+                args.correct_prompt or "",
                 args.ant_api,
                 args.openai_api,
                 args.llmapi,
                 model,
-                CORRECTION_PROMPT_TEMPLATE,
-                system_prompt,
+                correction_prompt_template_to_use,
+                system_prompt_to_use,
                 use_cot=args.cot,
                 use_context=args.context,
                 provider_params=provider_params,
                 use_thinking=args.thinking,
-                thinking_tokens=args.thinking_tokens
-            )
-            logging.info("Correction completed")
-
-            # Save corrected subtitles
-            corrected_srt = parse_translated_response(corrected_blocks, srt_content)
-            corrected_srt_path = os.path.join(session_folder, f"{video_name}_{args.source_language}_corrected.srt")
-            with open(corrected_srt_path, 'w', encoding='utf-8') as f:
-                f.write(corrected_srt)
-            logging.info(f"Corrected subtitles saved: {corrected_srt_path}")
-
-            if args.equalize:
-                output_srt = os.path.join(session_folder, f"{video_name}_{args.source_language}_corrected_final.srt")
-                equalize_srt(corrected_srt_path, output_srt, args.max_line_length)
-                logging.info(f"Equalized corrected subtitles saved: {output_srt}")
-
-            logging.info("Correction task completed. Ending process.")
-            return
-
-        # Handle correction flag for other tasks
-        if args.correct:
-            logging.info("Starting subtitle correction")
-            translation_blocks = create_translation_blocks(srt_content, args.llm_char, args.source_language)
-            corrected_blocks = correct_subtitles(
-                translation_blocks,
-                args.source_language,
-                args.correct_prompt,
-                args.ant_api,
-                args.openai_api,
-                args.llmapi,
-                model,
-                CORRECTION_PROMPT_TEMPLATE,
-                system_prompt,
-                use_cot=args.cot,
-                use_context=args.context,
-                provider_params=provider_params,
+                thinking_tokens=args.thinking_tokens,
                 gemini_api_key=args.gemini_api
             )
-            logging.info("Correction completed")
+            logging.info("Correction completed.")
 
-            # Save corrected subtitles
-            corrected_srt = parse_translated_response(corrected_blocks, srt_content)
-            corrected_srt_path = os.path.join(session_folder, f"{video_name}_{args.source_language}_corrected.srt")
+            corrected_srt = parse_translated_response(corrected_blocks, srt_content) # srt_content here is the renumbered original
+            corrected_srt_filename_base = f"{video_name}_{args.source_language}_corrected"
+            corrected_srt_path = os.path.join(session_folder, f"{corrected_srt_filename_base}.srt")
             with open(corrected_srt_path, 'w', encoding='utf-8') as f:
                 f.write(corrected_srt)
             logging.info(f"Corrected subtitles saved: {corrected_srt_path}")
-            
-            # Update srt_content to use corrected version for subsequent operations
-            srt_content = corrected_srt
-            # Update srt_path for potential equalization
-            srt_path = corrected_srt_path
+
+            srt_content = corrected_srt # Update srt_content for subsequent operations
+            srt_path = corrected_srt_path # Update srt_path for potential equalization
+
+            if args.task == 'correct': # If standalone correction task
+                if args.equalize: # If -equalize flag is also on for 'correct' task
+                    output_srt_eq_path = os.path.join(session_folder, f"{corrected_srt_filename_base}_final.srt")
+                    equalize_srt(corrected_srt_path, output_srt_eq_path, args.max_line_length) # Uses max_line_length (default 42)
+                    logging.info(f"Equalized corrected subtitles saved: {output_srt_eq_path}")
+                logging.info("Correction task completed. Ending process.")
+                return
 
         if args.task == 'transcribe':
-            logging.info("Transcription/correction completed. Ending process.")
-            if args.equalize:
-                output_srt = os.path.join(session_folder, f"{video_name}_{args.source_language}_final.srt")
-                equalize_srt(srt_path, output_srt, args.max_line_length)
+            logging.info("Transcription/correction (if enabled) completed. Ending process.")
+            if args.equalize: # If -equalize flag for 'transcribe' task
+                output_srt_eq_path = os.path.join(session_folder, f"{video_name}_{args.source_language}{'_corrected' if args.correct else ''}_final.srt")
+                equalize_srt(srt_path, output_srt_eq_path, args.max_line_length) # Uses max_line_length (default 42)
+                logging.info(f"Equalized subtitles saved: {output_srt_eq_path}")
             return
-    
+
+        final_srt = "" # Initialize to be used for speech blocks
+        translated_srt_path = "" # Initialize
+
         if args.task in ['full', 'translate', 'translation']:
+            if not args.target_language:
+                parser.error("Target language (--target_language) is required for translation tasks.")
+
             translation_blocks = create_translation_blocks(srt_content, args.llm_char, args.source_language)
-            logging.info(f"Created {len(translation_blocks)} translation blocks")
+            logging.info(f"Created {len(translation_blocks)} translation blocks from content of length {len(srt_content)}")
 
             glossary = manage_glossary(session_folder) if args.translation_memory else {}
+            evaluation_suffix = "" # For filename
 
             if args.llmapi == 'deepl':
-                translated_blocks = translate_blocks_deepl(translation_blocks, args.source_language, args.target_language, args.api_deepl)
+                if not args.api_deepl: parser.error("DeepL API key (--api_deepl) is required.")
+                translated_blocks_responses = translate_blocks_deepl(translation_blocks, args.source_language, args.target_language, args.api_deepl)
                 logging.info("DeepL translation completed")
-                final_blocks = translated_blocks
-                evaluation_suffix = ""
-            else:
-                translated_blocks, updated_glossary = translate_blocks(
-                    translation_blocks, 
-                    args.source_language, 
-                    args.target_language, 
+                final_blocks_responses = translated_blocks_responses
+            else: # Anthropic, OpenAI, OpenRouter, Gemini, Local LLMs
+                translated_blocks_responses, updated_glossary = translate_blocks(
+                    translation_blocks,
+                    args.source_language,
+                    args.target_language,
                     args.ant_api,
                     args.openai_api,
                     args.llmapi,
-                    glossary, 
-                    args.translation_memory, 
-                    args.evaluate,
+                    glossary,
+                    args.translation_memory,
+                    args.evaluate, # Pass evaluate flag to decide if glossary is updated here or later
                     model,
-                    translation_prompt,
-                    args.translate_prompt,
-                    glossary_prompt,
-                    system_prompt,
+                    translation_prompt_template_to_use,
+                    args.translate_prompt, # Specific additional instructions for translation
+                    glossary_prompt_instructions_to_use,
+                    system_prompt_to_use,
                     use_cot=args.cot,
                     use_context=args.context,
                     provider_params=provider_params,
@@ -2025,27 +2450,28 @@ def main():
                     thinking_tokens=args.thinking_tokens,
                     gemini_api_key=args.gemini_api
                 )
-                logging.info("Translation completed")
+                logging.info("LLM Translation completed")
 
                 if args.translation_memory and not args.evaluate:
                     save_glossary(session_folder, updated_glossary)
-                    logging.info("Updated glossary saved")
+                    logging.info("Updated glossary saved (pre-evaluation or no evaluation)")
 
                 if args.evaluate:
                     logging.info("Starting evaluation of translations")
-                    final_blocks, final_glossary = evaluate_translation(
-                        translation_blocks, 
-                        translated_blocks, 
-                        args.source_language, 
-                        args.target_language, 
+                    if not updated_glossary: updated_glossary = glossary # ensure glossary is passed
+                    final_blocks_responses, final_glossary = evaluate_translation(
+                        translation_blocks,
+                        translated_blocks_responses,
+                        args.source_language,
+                        args.target_language,
                         args.ant_api,
                         args.openai_api,
-                        args.llmapi, 
-                        updated_glossary, 
+                        args.llmapi,
+                        updated_glossary, # Pass potentially updated glossary from translation step
                         args.translation_memory,
-                        model,
-                        evaluation_prompt,
-                        system_prompt,
+                        model, # Use same model for eval or allow different? Current setup uses same.
+                        evaluation_prompt_template_to_use,
+                        system_prompt_to_use,
                         provider_params=provider_params,
                         use_thinking=args.thinking,
                         thinking_tokens=args.thinking_tokens,
@@ -2053,23 +2479,23 @@ def main():
                     )
                     logging.info("Evaluation completed")
                     evaluation_suffix = "_eval"
-                    
+
                     if args.translation_memory:
                         save_glossary(session_folder, final_glossary)
                         logging.info("Final glossary saved after evaluation")
                 else:
-                    final_blocks = translated_blocks
-                    evaluation_suffix = ""
+                    final_blocks_responses = translated_blocks_responses
+                    # No evaluation_suffix if not evaluated
 
             final_json_path = os.path.join(session_folder, f"{video_name}_{args.target_language}{evaluation_suffix}_final_blocks.json")
             with open(final_json_path, 'w', encoding='utf-8') as f:
-                json.dump(final_blocks, f, ensure_ascii=False, indent=2)
-            logging.info(f"Final translation blocks saved as JSON: {final_json_path}")
+                json.dump(final_blocks_responses, f, ensure_ascii=False, indent=2)
+            logging.info(f"Final translation blocks (JSON) saved: {final_json_path}")
 
             if args.llmapi == 'deepl':
-                final_srt = parse_deepl_response(final_blocks, srt_content)
+                final_srt = parse_deepl_response(final_blocks_responses, srt_content) # srt_content is the original (potentially corrected) source SRT
             else:
-                final_srt = parse_translated_response(final_blocks, srt_content)
+                final_srt = parse_translated_response(final_blocks_responses, srt_content) # srt_content is the original (potentially corrected) source SRT
 
             translated_srt_path = os.path.join(session_folder, f"{video_name}_{args.target_language}{evaluation_suffix}.srt")
             with open(translated_srt_path, 'w', encoding='utf-8') as f:
@@ -2079,19 +2505,39 @@ def main():
             if args.task in ['translate', 'translation']:
                 logging.info("Translation (and evaluation if requested) completed. Ending process.")
                 if args.equalize:
-                    output_srt = os.path.join(session_folder, f"{video_name}_{args.target_language}{evaluation_suffix}_final.srt")
-                    equalize_srt(translated_srt_path, output_srt, args.max_line_length)
+                    output_srt_eq_path = os.path.join(session_folder, f"{video_name}_{args.target_language}{evaluation_suffix}_final.srt")
+                    equalize_srt(translated_srt_path, output_srt_eq_path, args.max_line_length) # Uses max_line_length (default 42)
+                    logging.info(f"Equalized translated subtitles saved: {output_srt_eq_path}")
                 return
 
+        # Prepare srt_for_speech_blocks:
+        # If translation happened, use final_srt. Otherwise (e.g. task 'speech_blocks' on original SRT), use srt_content.
+        srt_for_speech_blocks = final_srt if final_srt else srt_content
+        lang_for_speech_blocks = args.target_language if args.task == 'full' and args.target_language else args.source_language
+
         if args.task in ['full', 'speech_blocks']:
-            speech_blocks = create_speech_blocks(final_srt if 'final_srt' in locals() else srt_content, 
-                                                 session_folder, video_name, 
-                                                 args.target_language if args.task == 'full' else args.source_language, 
-                                                 merge_threshold=args.merge_threshold)
-            logging.info(f"Created {len(speech_blocks)} speech blocks")
+            if not srt_for_speech_blocks:
+                 parser.error("SRT content is empty, cannot create speech blocks. Ensure transcription or translation ran successfully.")
+            speech_blocks = create_speech_blocks(
+                srt_for_speech_blocks,
+                session_folder, video_name,
+                lang_for_speech_blocks,
+                merge_threshold=args.merge_threshold
+            )
+            logging.info(f"Created {len(speech_blocks)} speech blocks for language {lang_for_speech_blocks}")
 
             if args.task == 'speech_blocks':
                 logging.info("Speech blocks creation completed. Ending process.")
+                # Optionally equalize the SRT that speech blocks were based on
+                if args.equalize:
+                    # Determine which SRT was used for speech blocks
+                    base_srt_path_for_speech_blocks = translated_srt_path if final_srt else srt_path
+                    if base_srt_path_for_speech_blocks and os.path.exists(base_srt_path_for_speech_blocks):
+                        output_srt_eq_path = os.path.splitext(base_srt_path_for_speech_blocks)[0] + "_final.srt"
+                        equalize_srt(base_srt_path_for_speech_blocks, output_srt_eq_path, args.max_line_length)
+                        logging.info(f"Equalized base SRT for speech blocks saved: {output_srt_eq_path}")
+                    else:
+                        logging.warning("Could not find base SRT path to equalize for speech_blocks task.")
                 return
 
         if args.task == 'full':
@@ -2100,18 +2546,18 @@ def main():
                 if os.path.exists(tts_voices_folder):
                     wav_files = [f for f in os.listdir(tts_voices_folder) if f.endswith('.wav')]
                     if wav_files:
-                        args.tts_voice = os.path.join(tts_voices_folder, wav_files[0])
-                        logging.info(f"Using TTS voice: {args.tts_voice}")
+                        args.tts_voice = os.path.join(tts_voices_folder, wav_files[0]) # Pick first one
+                        logging.info(f"Using first available TTS voice from 'tts-voices' folder: {args.tts_voice}")
                     else:
-                        raise ValueError("No WAV files found in the tts-voices folder")
+                        parser.error("No WAV files found in the 'tts-voices' folder and no TTS voice specified via --tts_voice.")
                 else:
-                    raise ValueError("No TTS voice specified and tts-voices folder not found")
+                    parser.error("No TTS voice specified via --tts_voice and 'tts-voices' folder not found.")
 
             try:
                 tts_language = get_xtts_language_code(args.target_language)
             except ValueError as e:
                 logging.error(str(e))
-                return
+                return # Exit if language not supported for TTS
 
             audio_files = generate_tts_audio(speech_blocks, args.tts_voice, tts_language, session_folder, video_name)
             logging.info(f"Generated {len(audio_files)} TTS audio files")
@@ -2120,22 +2566,33 @@ def main():
                 logging.error("No TTS audio files were generated. Cannot proceed with alignment and mixing.")
                 return
 
-            alignment_blocks = create_alignment_blocks(session_folder, video_name, args.target_language, args.evaluate)
+            # Determine if evaluation suffix should be used for alignment call
+            use_eval_suffix_for_alignment = args.evaluate and evaluation_suffix == "_eval"
+
+            alignment_blocks = create_alignment_blocks(session_folder, video_name, args.target_language, use_eval_suffix_for_alignment)
             logging.info(f"Created {len(alignment_blocks)} alignment blocks")
 
-            aligned_audio_path = align_audio_blocks(alignment_blocks, session_folder)
+            aligned_audio_path = align_audio_blocks(alignment_blocks, session_folder, args.delay_start, args.speed_up)
             logging.info(f"Audio alignment completed: {aligned_audio_path}")
 
             if video_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
-                final_output_path = mix_audio_tracks(video_path, aligned_audio_path, session_folder, video_name, args.target_language, args.evaluate)
+                final_output_path = mix_audio_tracks(video_path, aligned_audio_path, session_folder, video_name, args.target_language, use_eval_suffix_for_alignment)
                 logging.info(f"Final output saved: {final_output_path}")
-            else:
-                logging.info(f"Aligned audio saved: {aligned_audio_path}")
+            else: # If input was audio or SRT, just save the aligned audio
+                logging.info(f"Aligned audio (dub) saved: {aligned_audio_path}")
+                # Optionally, copy the aligned audio to a more prominent name if it's the final product for an audio-only workflow
+                final_dub_path = os.path.join(session_folder, f"{video_name}_{args.target_language}{evaluation_suffix}_dubbed_audio.wav")
+                shutil.copy(aligned_audio_path, final_dub_path)
+                logging.info(f"Final dubbed audio also saved as: {final_dub_path}")
 
-            if args.equalize:
-                input_srt = translated_srt_path
-                output_srt = os.path.join(session_folder, f"{video_name}_{args.target_language}{evaluation_suffix}_final.srt")
-                equalize_srt(input_srt, output_srt, args.max_line_length)
+
+            if args.equalize: # Equalize the final translated SRT
+                if translated_srt_path and os.path.exists(translated_srt_path):
+                    output_srt_eq_path = os.path.splitext(translated_srt_path)[0] + "_final.srt"
+                    equalize_srt(translated_srt_path, output_srt_eq_path, args.max_line_length) # Uses max_line_length (default 42)
+                    logging.info(f"Equalized final translated subtitles saved: {output_srt_eq_path}")
+                else:
+                    logging.warning("Translated SRT path not found for final equalization.")
 
             cleanup_temp_files(session_folder, args.task)
             logging.info("Temporary files cleaned up")
@@ -2144,7 +2601,7 @@ def main():
 
     except Exception as e:
         logging.error(f"An error occurred: {str(e)}", exc_info=True)
-        raise
+        # raise # Optionally re-raise for clearer exit in some environments
 
 if __name__ == "__main__":
     main()
