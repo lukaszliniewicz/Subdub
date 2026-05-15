@@ -1,203 +1,206 @@
-# Subdub: Advanced Subtitle Translation and Dubbing Tool
+# Subdub: Subtitle Translation and Dubbing CLI
 
-Subdub is a command-line tool for creating subtitles from video, translating them, generating dubbed audio and syncing dubbed audio with the original video. It was created to enhance the dubbing functionality of [Pandrator](https://github.com/lukaszliniewicz/pandrator), but can be used on its own, albeit with limited functionality. Pandrator provides a GUI that makes it possible to preview, edit, and regenerate subtitle audio before aligning and synchronising it, as well as manage the entire workflow.
+Subdub is a command-line tool for:
 
-Dubbing sample, including translation from Russian ([video source](https://www.youtube.com/watch?v=_SwUpU0E2Eg&t=61s&pp=ygUn0LLRi9GB0YLRg9C_0LvQtdC90LjQtSDQu9C10LPQsNGB0L7QstCw)):
+- transcribing media with WhisperX,
+- correcting/translating subtitles with LLMs through LiteLLM (or DeepL),
+- generating dubbed speech with XTTS,
+- and syncing dubbed audio back into video.
+
+It was created to support the dubbing workflow in [Pandrator](https://github.com/lukaszliniewicz/pandrator), but it also works standalone.
+
+Dubbing sample (Russian -> translated dub):
 
 https://github.com/user-attachments/assets/1ba8068d-986e-4dec-a162-3b7cc49052f4
 
-## Table of Contents
-1. [Installation](#installation)
-2. [Usage](#usage)
-3. [Tasks](#tasks)
-4. [Arguments](#arguments)
-5. [Workflow](#workflow)
-6. [Examples](#examples)
-7. [Dependencies](#dependencies)
+## Current State After Refactor
+
+The app has been refactored from a monolithic file into modular pipeline stages.
+
+- `subdub.cli` + `subdub.cli_args`: entrypoint and argument parsing.
+- `subdub.app`: runtime orchestration and stage ordering.
+- `subdub.tasks.*`: stage modules (`input`, `correction`, `translation`, `speech`, `transcribe`).
+- `subdub.ai.client`: centralized LiteLLM request layer, callbacks, structured output handling, cost tracking.
+- `subdub.media.*` and `subdub.workflows.*`: FFmpeg, TTS, sync, boundary-correction workflows.
+- Compatibility re-exports remain in `subdub.ai.translate` and `subdub.models`.
 
 ## Installation
 
-1. Clone the repository:
-`git clone https://github.com/lukaszliniewicz/Subdub.git`
-2. Move to the Subdub directory:
-`cd Subdub`
-2. Install requirements:
-`pip install -r requirements.txt`
+### Prerequisites
 
-3. Make sure [WhisperX](https://github.com/m-bain/whisperX) is available on your system.
+- Python 3.10+
+- FFmpeg available in `PATH`
+- WhisperX available either:
+  - as a direct `whisperx` command, or
+  - via conda fallback (`CONDA_EXE` and `WHISPERX_CONDA_ENV`)
+- XTTS API server running at `http://localhost:8020` (for dubbing/TTS)
 
-4. Ensure the [XTTS API Server](https://daswer123/xtts-api-server) is running.
+Required external services depend on your model/task:
 
-## Usage
+- LLM provider key(s): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `OPENROUTER_API_KEY`
+- `DEEPL_API_KEY` when using `--use-deepl`
+- `HF_TOKEN` when using `-diarize`
 
-Basic usage:
-`python Subdub.py -i [input_file] -sl [source_language] -tl [target_language] -task [task_name] -tts_voice [path to a 6-12s 22050hz mono .wav file]`
+Environment behavior notes:
 
-If you want to perform translation, you need to have an Anthropic, OpenAI or DeepL API key and provide it as an argument. Using the local LLM API (Text Generation WebUI's) doesn't require an api key. You can also set the keys as environmental variables (OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPL_API_KEY).  
+- `OPENROUTER_API` is accepted as a legacy alias and copied to `OPENROUTER_API_KEY` if needed.
+- For localhost-style `-api_base` endpoints, Subdub auto-fills `OPENAI_API_KEY=lm-studio` when no key is set.
 
-## Tasks
+### Setup
 
-Subdub offers several task modes:
+```bash
+git clone https://github.com/lukaszliniewicz/Subdub.git
+cd Subdub
+pip install -e .
+```
 
-### 1. full
-- **Description**: Performs the complete pipeline: transcription, translation, TTS generation, and audio synchronization.
-- **Input**: Video file or URL
-- **Output**: Translated subtitles, TTS audio, and final dubbed video with mixed audio
-- **Usage**: `python Subdub.py -i video.mp4 -sl English -tl Spanish -task full`
+Optional extras:
 
-### 2. transcribe
-- **Description**: Transcribes the audio from a video file using WhisperX.
-- **Input**: Video file or URL
-- **Output**: SRT subtitle file in the source language
-- **Usage**: `python Subdub.py -i video.mp4 -sl English -task transcribe -whisper_model large-v3`
+- `pip install -e .[dev]` for tests/lint/type checks
+- `pip install -e .[gui]` for manual correction GUI features
 
-### 3. translate
-- **Description**: Translates existing subtitles to the target language using selected AI model.
-- **Input**: SRT subtitle file
-- **Output**: Translated SRT subtitle file
-- **Usage**: `python Subdub.py -i subtitles.srt -sl English -tl French -task translate -llmapi anthropic -llm-model sonnet`
+## Quick Start
 
-### 4. tts
-- **Description**: Generates Text-to-Speech audio from existing subtitles using XTTS.
-- **Input**: SRT subtitle file
-- **Output**: WAV audio files for each speech block
-- **Usage**: `python Subdub.py -i subtitles.srt -tl Spanish -task tts -tts_voice voice.wav`
+```bash
+# Full pipeline: transcribe -> translate -> speech blocks -> TTS -> sync/mix
+subdub -task full -i video.mp4 -sl English -tl Spanish -tts_voice voice.wav
 
-### 5. speech_blocks
-- **Description**: Creates optimized speech blocks from subtitles for advanced TTS processing.
-- **Input**: SRT subtitle file
-- **Output**: JSON file containing speech blocks with optimal segmentation
-- **Usage**: `python Subdub.py -i subtitles.srt -task speech_blocks -merge_threshold 1`
+# Transcription only
+subdub -task transcribe -i video.mp4 -sl English
 
-### 6. sync
-- **Description**: Synchronizes existing TTS audio with the original video without regenerating audio.
-- **Input**: Video file, speech blocks JSON, and TTS audio files
-- **Output**: Final dubbed video with mixed audio
-- **Usage**: `python Subdub.py -task sync -session existing_session -video original.mp4`
+# Translate existing subtitles
+subdub -task translate -i subtitles.srt -sl English -tl French
 
-### 7. equalize
-- **Description**: Reformats subtitle text for better readability, adjusting line lengths and breaks.
-- **Input**: SRT subtitle file
-- **Output**: Equalized SRT file with optimal line lengths
-- **Usage**: `python Subdub.py -i subtitles.srt -task equalize -characters 42`
+# Correct subtitles in-place language (no translation)
+subdub -task correct -i subtitles.srt -sl English
 
-### 8. correct
-- **Description**: Corrects and improves subtitle text without translation (fixing punctuation, capitalization, etc.)
-- **Input**: SRT subtitle file
-- **Output**: Corrected SRT subtitle file in the same language
-- **Usage**: `python Subdub.py -i subtitles.srt -sl English -task correct -correct_prompt "Fix colloquialisms"`
+# Zoom transcript correction (.vtt input)
+subdub -task zoom-transcript -i meeting.vtt
+```
 
-## Arguments
+Alternative invocation:
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `-i`, `--input` | Input video, subtitle file, or URL | - |
-| `-sl`, `--source_language` | Source language | English |
-| `-tl`, `--target_language` | Target language for translation | - |
-| `-task` | Task to perform | full |
-| `-session` | Session name or path | auto-generated |
-| `-llm-char` | Character limit for translation blocks | 4000 |
-| `-ant_api` | Anthropic API key | env or prompt |
-| `-openai_api` | OpenAI API key | env or prompt |
-| `-gemini_api` | Google Gemini API key | env or prompt |
-| `-api_deepl` | DeepL API key | env or prompt |
-| `-translation_memory` | Enable translation memory/glossary | False |
-| `-tts_voice` | Path to TTS voice WAV file | - |
-| `-whisper_model` | Whisper model for transcription | large-v2 |
-| `-llmapi` | LLM API to use (anthropic, openai, local, deepl, openrouter, gemini) | anthropic |
-| `-llm-model` | LLM model (sonnet, haiku, gpt-4o, gpt-4o-mini, etc.) | sonnet |
-| `-merge_threshold` | Max time (ms) between subtitles to merge | 1 |
-| `-equalize` | Apply SRT equalizer to subtitles | False |
-| `-characters` | Max line length for equalization | 60 |
-| `-correct` | Enable subtitle correction | False |
-| `-correct_prompt` | Additional instructions for correction | - |
-| `-translate_prompt` | Additional instructions for translation | - |
-| `-cot` | Enable chain-of-thought prompting | False |
-| `-context` | Add previous output as context | False |
-| `-thinking` | Enable Claude's extended thinking (Sonnet only) | False |
-| `-thinking_tokens` | Budget tokens for extended thinking | 4000 |
-| `-video` | Input video for sync task | auto-detect |
-| `-max_line_length` | Maximum line length for SRT equalization | 42 |
+```bash
+python -m subdub -task full -i video.mp4 -sl English -tl Spanish -tts_voice voice.wav
+```
 
-### OpenRouter Parameters
+## Task Modes
 
-When using `-llmapi openrouter`, these additional parameters are available:
+| Task | Purpose | Typical Input | Main Output |
+|---|---|---|---|
+| `full` | End-to-end pipeline (STT -> translation -> TTS -> sync/mix) | media file / URL / subtitle file | translated SRT, speech blocks, aligned audio, final dubbed media |
+| `transcribe` | WhisperX transcription (+ optional diarization/correction) | media file / URL | source SRT or JSON-derived corrected SRT |
+| `translate` | Translate subtitles (LLM or DeepL) | media / `.srt` / WhisperX `.json` | translated SRT + block JSON |
+| `correct` | Correct subtitle text in source language | media / `.srt` / WhisperX `.json` | corrected SRT |
+| `speech_blocks` | Build speech segmentation JSON for dubbing | media / `.srt` / translated SRT | `*_speech_blocks.json` |
+| `sync` | Align existing generated speech with video | existing `-session` (+ optional `-v`) | final mixed dubbed video/audio |
+| `equalize` | Standalone subtitle line equalization | `.srt` | `_equalized.srt` |
+| `zoom-transcript` | Correct grouped Zoom VTT transcript chunks | `.vtt` | corrected transcript `.txt` |
+| `tts` | Legacy parser option (see notes below) | n/a | n/a |
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `-provider` | Providers to prioritize (comma-separated, e.g., 'Anthropic,OpenAI') | - |
-| `-sort` | Provider sorting strategy (price, throughput, latency) | - |
-| `-fallbacks` | Allow fallbacks to other providers | True |
-| `-no-fallbacks` | Disable fallbacks to other providers | - |
-| `-ignore` | Providers to ignore (comma-separated list) | - |
-| `-data-collection` | Data collection policy (allow, deny) | allow |
-| `-require-parameters` | Require providers to support all parameters | False |
+## CLI Reference
 
-### AI Model Selection
+Run `subdub -h` for the full list. Most relevant flags are below.
 
-Subdub supports multiple AI providers and models:
+### Core
 
-- **Anthropic Claude**: 
-  - `sonnet` (claude-3-7-sonnet-latest, recommended for quality)
-  - `haiku` (claude-3-5-haiku-latest, faster)
+- `-i`, `--input`: input path or URL (required for most tasks)
+- `-task`: `tts|full|transcribe|translate|speech_blocks|sync|equalize|correct|zoom-transcript` (default: `full`)
+- `-session`: custom session folder (otherwise auto-generated)
+- `-log`: also write detailed logs to `subtitle_app.log`
+- `-sl`, `--source_language`: source language (default: `English`)
+- `-tl`, `--target_language`: target language for translation/dubbing
 
-- **OpenAI**: 
-  - `gpt-4o` (highest quality but slower)
-  - `gpt-4o-mini` (faster, good quality)
+### LLM / Provider / Translation
 
-- **Google Gemini**:
-  - `gemini-flash` (standard)
-  - `gemini-flash-thinking` (with thinking)
+- `-model`: LiteLLM model string (default: `anthropic/claude-3-5-sonnet-20241022`)
+- `-ant_api`, `-openai_api`, `-gemini_api`, `-api_deepl`: API keys
+- `--use-deepl`: use DeepL instead of LLM translation
+- `-api_base`: custom/local OpenAI-compatible endpoint base URL
+- `-llm-char`: max characters per translation/correction block (default: `4000`)
+- `-max_tokens`: max output tokens for provider call
+- `-reasoning_effort`: `minimal|low|medium|high`
+- `-evaluate`: second-pass evaluation/improvement stage
+- `-translation_memory`: glossary memory file (`translation_glossary.json`)
+- `-context`: pass prior response context between blocks
+- `--no-remove-subtitles`: prohibit LLM `[REMOVE]` behavior
+- `-translate_prompt`: extra translation instructions appended to prompt
 
-- **OpenRouter**:
-  - `deepseek-r1` 
-  - `qwq-32b`
-  - Can add `:nitro` suffix for throughput or `:floor` for lowest cost
+OpenRouter-specific:
 
-- **DeepL**: For pure translation without customization
+- `-provider`: prioritized provider(s), comma-separated
+- `-sort`: `price|throughput|latency`
+- `-fallbacks` / `-no-fallbacks`: enable/disable provider fallback
+- `-ignore`: provider(s) to ignore
+- `-data-collection`: `allow|deny`
+- `-require-parameters`: require provider parameter support
 
-- **Local**: Uses Text Generation WebUI API
+### Transcription / Correction
 
-### Glossary
+- `-whisper_model`: Whisper model (default: `large-v3`)
+- `-align_model`: custom WhisperX alignment model
+- `-whisper_prompt`: custom initial prompt for WhisperX
+- `-chunk_size`: WhisperX chunk size (default: `15`)
+- `-diarize`: enable speaker diarization
+- `--hf_token`: Hugging Face token for diarization
+- `--no-boundary-correction`: disable automatic boundary correction
+- `-manual_correction`: open manual correction GUI (PyQt6 extra required)
+- `--save_txt`: save transcript as `.txt` during WhisperX run
+- `-correct`: run correction stage before translation
+- `-correct_prompt`: additional correction instructions
+- `-resegment`: use word-level re-segmentation pipeline
 
-- **Translation Memory/Glossary (-translation_memory)**: This feature maintains a glossary of terms and their translations. It helps ensure consistency across the translation, especially for domain-specific terms or recurring phrases. The glossary is updated throughout the translation process and can be reused in future sessions.
+### Dubbing / Sync / Subtitle Formatting
 
-## Workflow
+- `-tts_voice`: 6-12s voice `.wav` for XTTS (for `full`; falls back to first `.wav` in `tts-voices/` if omitted)
+- `-merge_threshold`: subtitle merge threshold in ms (default: `250`)
+- `--delay_start`: initial per-block delay cap in ms (default: `2000`)
+- `--speed_up`: max speed-up percentage during alignment (default: `115`)
+- `-v`, `--video`: optional input video override for `sync`
+- `-equalize`: also equalize final SRT in task output
+- `-max_line_length`: line length for `-equalize` (default: `42`)
+- `-characters`: line length for standalone `-task equalize` (default: `60`)
 
-Subdub follows a logical workflow to process videos and generate dubbed audio:
+### Prompt Overrides
 
-1. **SRT Generation**: If the input is a video file, Subdub uses WhisperX to transcribe the audio and generate an SRT file.
+- `-t_prompt`: full custom translation prompt template
+- `-eval_prompt`: full custom evaluation prompt template
+- `-gloss_prompt`: full custom glossary prompt template
+- `-sys_prompt`: custom system prompt
 
-2. **Translation Blocks**: The SRT file is divided into translation blocks, considering character limits and sentence structures.
+## Session Outputs
 
-3. **Translation**: Each block is translated using an API. If translation memory is enabled, a glossary is used and updated during this process.
+Each run writes artifacts into the session folder (`-session` or auto-generated). Depending on task/settings, typical files include:
 
-4. **Translated SRT**: The translated blocks are reassembled into a new SRT file in the target language.
+- extracted audio (`<video>.wav`)
+- transcription output (`<video>.json` and/or corrected `.srt`)
+- translated/corrected subtitle outputs (`*.srt`, `*_final_blocks.json`)
+- speech segmentation (`*_speech_blocks.json`)
+- per-block XTTS wavs (`Sentence_wavs/*.wav`)
+- aligned dubbed audio (`aligned_audio.wav`)
+- final mixed video (`final_output.mp4`) or dubbed audio only
+- optional session log (`subtitle_app.log` when `-log` is enabled)
 
-5. **Speech Blocks**: The translated SRT is processed to create speech blocks, which are optimized segments for Text-to-Speech generation.
+## LiteLLM Notes
 
-6. **TTS Generation**: Audio is generated for each speech block using the XTTS API Server.
+- All LLM operations route through `subdub.ai.client.llm_api_request`.
+- LiteLLM callbacks are configured once per process and log input/success/failure details.
+- Structured output schemas are used for correction/re-segmentation flows.
+- Session-level estimated API cost is accumulated and logged at the end.
 
-7. **Alignment Blocks**: Speech blocks are aligned with the original video timing.
+## Known Behavior and Caveats
 
-8. **Synchronization and Mixing**: The generated audio is synchronized with the video. During this process, the original audio volume is lowered when dubbed audio is playing.
-
-## Examples
-
-1. Full process with translation memory:
-python Subdub.py -i video.mp4 -sl English -tl Spanish -task full -translation_memory
-
-2. Translate existing subtitles and evaluate the translation:
-python Subdub.py -i subtitles.srt -sl English -tl French -task translate -evaluate
-
-3. Generate TTS for translated subtitles with a custom voice:
-python Subdub.py -i translated.srt -tl German -task tts -tts_voice custom_voice.wav
+- `-task tts` is still present in parser choices for compatibility, but the current refactored pipeline does not execute a standalone TTS-only stage. Use `full` (or `speech_blocks` + existing audio workflow) instead.
+- API key validation happens at startup based on selected `-model` and flags. With the default model, `ANTHROPIC_API_KEY` is expected even if your task does not call translation.
+- `-resegment` is designed for media input or WhisperX JSON word timestamps; plain `.srt` input is not a good fit for that mode.
 
 ## Dependencies
 
+Python package dependencies are defined in `pyproject.toml`.
+
+External runtime tools/services:
+
 - FFmpeg
 - WhisperX
-- Anthropic, OpenAI, DeepL or Text Generation WebUI API (for translation)
-- XTTS API Server (for Text-to-Speech)
-
-Ensure all dependencies are installed and properly configured before running Subdub.
+- XTTS API Server
+- LLM provider endpoint(s) via LiteLLM (or DeepL when selected)

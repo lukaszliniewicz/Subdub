@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subdub"
+version = "0.1.0"
+description = "Video subtitle translation and dubbing tool"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "librosa",
+    "numpy",
+    "requests",
+    "pydub",
+    "srt",
+    "yt_dlp",
+    "srt_equalizer",
+    "deepl",
+    "litellm",
+    "pydantic",
+    "sentence_splitter"
+]
+
+[project.optional-dependencies]
+gui = [
+    "PyQt6",
+    "matplotlib",
+    "sounddevice",
+]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "ruff>=0.6.0",
+    "types-requests",
+]
+
+[project.scripts]
+subdub = "subdub.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+exclude = ["src/subdub.egg-info"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_configs = true
+files = [
+    "src/subdub/app.py",
+    "src/subdub/cli.py",
+    "src/subdub/cli_args.py",
+    "src/subdub/cli_helpers.py",
+    "src/subdub/ai/client.py",
+]

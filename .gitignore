@@ -1,0 +1,99 @@
+# ==========================================
+# 1. PROJECT SPECIFIC RULES (Your Request)
+# ==========================================
+
+# Ignore the outputs folder (at any level)
+outputs/
+
+# Ignore any folder starting with "session" (e.g., session, sessions, session_data)
+session*/
+
+# ==========================================
+# 2. OPERATING SYSTEM FILES
+# ==========================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+
+# ==========================================
+# 3. EDITOR & IDE CONFIGURATIONS
+# ==========================================
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (IntelliJ, PyCharm, etc.)
+.idea/
+*.iml
+
+# Vim / Emacs
+*.swp
+*.swo
+*~
+.directory
+
+# ==========================================
+# 4. ENVIRONMENT & SECRETS (CRITICAL)
+# ==========================================
+
+# Environment variables and keys
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials.json
+secrets/
+
+# ==========================================
+# 5. COMMON LANGUAGE SPECIFICS
+# ==========================================
+
+# --- Python (Common with 'outputs' folders) ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
+
+# --- Node.js ---
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ==========================================
+# 6. LOGS AND CACHE
+# ==========================================
+
+*.log
+logs/
+.cache/
+.cecli*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

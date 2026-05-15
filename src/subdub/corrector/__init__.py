@@ -1,0 +1,1 @@
+"""Whisper boundary corrector module."""
