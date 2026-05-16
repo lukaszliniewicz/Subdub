@@ -32,7 +32,7 @@ The app has been refactored from a monolithic file into modular pipeline stages.
 - FFmpeg available in `PATH`
 - WhisperX available either:
   - as a direct `whisperx` command, or
-  - via conda fallback (`CONDA_EXE` and `WHISPERX_CONDA_ENV`)
+  - via Pandrator Pixi fallback (`WHISPERX_PIXI_EXE` and `WHISPERX_PIXI_MANIFEST`)
 - XTTS API server running at `http://localhost:8020` (for dubbing/TTS)
 
 Required external services depend on your model/task:
@@ -45,6 +45,7 @@ Environment behavior notes:
 
 - `OPENROUTER_API` is accepted as a legacy alias and copied to `OPENROUTER_API_KEY` if needed.
 - For localhost-style `-api_base` endpoints, Subdub auto-fills `OPENAI_API_KEY=lm-studio` when no key is set.
+- Pandrator WhisperX fallback defaults to `../bin/pixi.exe` with `../envs/whisperx_installer/pixi.toml`.
 
 ### Setup
 

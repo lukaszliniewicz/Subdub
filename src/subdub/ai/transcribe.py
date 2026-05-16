@@ -50,24 +50,44 @@ def transcribe_audio(audio_path: str, language: str, session_folder: str, video_
         if result.stderr:
             logger.warning(f"WhisperX warning: {safe_decode(result.stderr)}")
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logger.warning(f"Direct whisperx command failed, trying conda run method. Error: {str(e)}")
+        logger.warning(f"Direct whisperx command failed, trying Pandrator pixi run method. Error: {str(e)}")
         try:
-            conda_exe = os.environ.get("CONDA_EXE", "../conda/Scripts/conda.exe")
-            conda_env = os.environ.get("WHISPERX_CONDA_ENV", "../conda/envs/whisperx_installer")
-            conda_whisperx_command = [
-                conda_exe, "run", "-p", conda_env, "--no-capture-output",
-                "python", "-m", "whisperx"
+            pixi_exe = os.environ.get("WHISPERX_PIXI_EXE", "../bin/pixi.exe")
+            pixi_manifest = os.environ.get("WHISPERX_PIXI_MANIFEST", "../envs/whisperx_installer/pixi.toml")
+
+            if not os.path.exists(pixi_exe):
+                raise FileNotFoundError(f"Pixi executable not found at: {pixi_exe}")
+            if not os.path.exists(pixi_manifest):
+                raise FileNotFoundError(f"WhisperX pixi manifest not found at: {pixi_manifest}")
+
+            pixi_whisperx_command = [
+                pixi_exe,
+                "run",
+                "--manifest-path",
+                pixi_manifest,
+                "--executable",
+                "python",
+                "-m",
+                "whisperx",
             ] + base_whisperx_args
-            logger.info(f"Attempting conda run whisperx command: {' '.join(conda_whisperx_command)}")
-            result = subprocess.run(conda_whisperx_command, check=True, capture_output=True)
+            logger.info(f"Attempting pixi run whisperx command: {' '.join(pixi_whisperx_command)}")
+            result = subprocess.run(pixi_whisperx_command, check=True, capture_output=True)
             if result.stderr:
                 logger.warning(f"WhisperX warning: {safe_decode(result.stderr)}")
-        except subprocess.CalledProcessError as e_conda:
-            logger.error(f"WhisperX command failed using both methods.")
-            if isinstance(e, subprocess.CalledProcessError):
-                 logger.error(f"Direct WhisperX Error output:\n{safe_decode(e.stderr)}")
-            logger.error(f"Conda WhisperX Error output:\n{safe_decode(e_conda.stderr)}")
-            raise ExternalToolError("WhisperX failed with both direct and conda execution paths.") from e_conda
+        except (subprocess.CalledProcessError, FileNotFoundError) as e_pixi:
+            logger.error("WhisperX command failed using both methods.")
+
+            if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+                logger.error(f"Direct WhisperX Error output:\n{safe_decode(e.stderr)}")
+            else:
+                logger.error(f"Direct WhisperX error: {str(e)}")
+
+            if isinstance(e_pixi, subprocess.CalledProcessError) and e_pixi.stderr:
+                logger.error(f"Pixi WhisperX Error output:\n{safe_decode(e_pixi.stderr)}")
+            else:
+                logger.error(f"Pixi WhisperX error: {str(e_pixi)}")
+
+            raise ExternalToolError("WhisperX failed with both direct and Pandrator pixi execution paths.") from e_pixi
     
     whisperx_output_filename_base = os.path.splitext(os.path.basename(audio_path))[0]
     whisperx_generated_file_path = os.path.join(session_folder, f"{whisperx_output_filename_base}.{expected_format}")
